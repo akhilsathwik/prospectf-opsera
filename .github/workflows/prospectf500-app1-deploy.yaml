@@ -343,7 +343,27 @@ jobs:
 
           echo ""
           echo "=== LoadBalancer URL ==="
-          kubectl get svc ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo "LoadBalancer pending..."
+          LB_HOSTNAME=$(kubectl get svc ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+          if [ -n "$LB_HOSTNAME" ] && [ "$LB_HOSTNAME" != "" ]; then
+            echo "✓ LoadBalancer ready!"
+            echo ""
+            echo "ELB URL: http://$LB_HOSTNAME"
+            echo "ELB URL (HTTPS): https://$LB_HOSTNAME"
+            echo ""
+            echo "Note: HTTPS may not work until ACM certificate is configured"
+            echo ""
+            echo "To access the application:"
+            echo "  curl http://$LB_HOSTNAME"
+            echo ""
+            echo "Or wait for DNS record:"
+            echo "  https://prospectf500-app1-dev.agents.opsera-labs.com"
+          else
+            echo "⚠ LoadBalancer is still pending..."
+            echo "This usually takes 2-5 minutes after service creation"
+            echo ""
+            echo "Check service status:"
+            kubectl describe svc ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} | grep -A 10 "Events:" || true
+          fi
 
   check-dns:
     name: "Check DNS and ExternalDNS Status"
