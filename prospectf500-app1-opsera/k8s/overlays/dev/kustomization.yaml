@@ -7,11 +7,11 @@ resources:
   - ../../base
 
 # Image tags will be updated by GitHub Actions workflow
-# Placeholders will be replaced: ECR_REGISTRY -> actual ECR registry URL
+# Placeholders will be replaced: 792373136340.dkr.ecr.eu-north-1.amazonaws.com -> actual ECR registry URL
 images:
   - name: prospectf500-app1-backend
-    newName: ECR_REGISTRY/prospectf500-app1-backend
-    newTag: latest
+    newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
+    newTag: 75729b4
   - name: prospectf500-app1-frontend
-    newName: ECR_REGISTRY/prospectf500-app1-frontend
-    newTag: latest
+    newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-frontend
+    newTag: 75729b4
