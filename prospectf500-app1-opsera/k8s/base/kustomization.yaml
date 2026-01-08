@@ -12,8 +12,8 @@ resources:
 
 images:
   - name: prospectf500-app1-backend
-    newName: ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
+    newName: prospectf500-app1-backend
     newTag: latest
   - name: prospectf500-app1-frontend
-    newName: ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-frontend
+    newName: prospectf500-app1-frontend
     newTag: latest
