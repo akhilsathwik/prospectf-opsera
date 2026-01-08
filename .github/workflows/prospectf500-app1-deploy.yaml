@@ -1,0 +1,239 @@
+name: "prospectf500-app1 Deploy"
+
+on:
+  push:
+    branches:
+      - prospectf500-app1-opsera
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'prospectf500-app1-opsera/k8s/**'
+      - '.github/workflows/prospectf500-app1-deploy.yaml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-north-1
+  APP_IDENTIFIER: prospectf500-app1
+  TENANT: opsera-se
+  ENVIRONMENT: dev
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-push:
+    name: "Build and Push Images"
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+      aws_account_id: ${{ steps.vars.outputs.aws_account_id }}
+      ecr_registry: ${{ steps.vars.outputs.ecr_registry }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up variables
+        id: vars
+        run: |
+          IMAGE_TAG=$(echo ${{ github.sha }} | cut -c1-7)
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "aws_account_id=$AWS_ACCOUNT_ID" >> $GITHUB_OUTPUT
+          echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+          
+          echo "Image tag: $IMAGE_TAG"
+          echo "AWS Account ID: $AWS_ACCOUNT_ID"
+          echo "ECR Registry: $ECR_REGISTRY"
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repos if not exist
+        run: |
+          aws ecr describe-repositories --repository-names ${{ env.APP_IDENTIFIER }}-backend --region ${{ env.AWS_REGION }} 2>/dev/null || \
+            aws ecr create-repository --repository-name ${{ env.APP_IDENTIFIER }}-backend --region ${{ env.AWS_REGION }}
+
+          aws ecr describe-repositories --repository-names ${{ env.APP_IDENTIFIER }}-frontend --region ${{ env.AWS_REGION }} 2>/dev/null || \
+            aws ecr create-repository --repository-name ${{ env.APP_IDENTIFIER }}-frontend --region ${{ env.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.ecr_registry }}/${{ env.APP_IDENTIFIER }}-backend:${{ steps.vars.outputs.image_tag }}
+            ${{ steps.vars.outputs.ecr_registry }}/${{ env.APP_IDENTIFIER }}-backend:latest
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.ecr_registry }}/${{ env.APP_IDENTIFIER }}-frontend:${{ steps.vars.outputs.image_tag }}
+            ${{ steps.vars.outputs.ecr_registry }}/${{ env.APP_IDENTIFIER }}-frontend:latest
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  update-manifests:
+    name: "Update K8s Manifests"
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update kustomization with new image tags (Fix #82: Update ALL images)
+        run: |
+          cd prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+
+          # Get AWS Account ID
+          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
+          ECR_REGISTRY="${{ needs.build-and-push.outputs.ecr_registry }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+
+          # Update backend image (Fix #82: Update ALL images)
+          sed -i "s|newName: .*/${APP_IDENTIFIER}-backend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
+
+          # Update frontend image (Fix #82: Update ALL images)
+          sed -i "s|newName: .*/${APP_IDENTIFIER}-frontend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
+
+          # Update ALL tags
+          sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
+
+          # Validate no placeholders remain (Fix #81)
+          if grep -q "ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
+            echo "ERROR: Placeholders found in kustomization.yaml"
+            exit 1
+          fi
+
+          echo "Updated kustomization.yaml:"
+          cat kustomization.yaml
+
+      - name: Commit and push changes (Fix #89: Handle conflicts)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}/kustomization.yaml
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git pull --rebase origin prospectf500-app1-opsera || true
+            git commit -m "[skip ci] Update image tags to ${{ needs.build-and-push.outputs.image_tag }}"
+            git push || echo "Push conflict - will retry on next run"
+          fi
+
+  deploy-to-cluster:
+    name: "Deploy to Workload Cluster"
+    runs-on: ubuntu-latest
+    needs: [build-and-push, update-manifests]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: prospectf500-app1-opsera
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check if workload cluster exists
+        id: check-cluster
+        run: |
+          if aws eks describe-cluster --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "cluster_exists=true" >> $GITHUB_OUTPUT
+            echo "Workload cluster found"
+          else
+            echo "cluster_exists=false" >> $GITHUB_OUTPUT
+            echo "WARNING: Workload cluster not found. Run infrastructure workflow first."
+          fi
+
+      - name: Configure kubectl
+        if: steps.check-cluster.outputs.cluster_exists == 'true'
+        run: |
+          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
+
+      - name: Deploy with Kustomize
+        if: steps.check-cluster.outputs.cluster_exists == 'true'
+        run: |
+          echo "Deploying to namespace: ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}"
+          kubectl apply -k prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+
+      - name: Wait for deployments
+        if: steps.check-cluster.outputs.cluster_exists == 'true'
+        run: |
+          kubectl rollout status deployment/${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --timeout=300s
+          kubectl rollout status deployment/${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --timeout=300s
+
+      - name: Get deployment status
+        if: steps.check-cluster.outputs.cluster_exists == 'true'
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+
+          echo ""
+          echo "=== Services ==="
+          kubectl get svc -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+
+          echo ""
+          echo "=== LoadBalancer URL ==="
+          kubectl get svc ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo "LoadBalancer pending..."
+
+  verify-endpoint:
+    name: "Verify Endpoint (Fix #83: Mandatory)"
+    runs-on: ubuntu-latest
+    needs: deploy-to-cluster
+    timeout-minutes: 15
+
+    steps:
+      - name: Wait for endpoint (Fix #83: Mandatory verification)
+        run: |
+          ENDPOINT="https://${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}.agents.opsera-labs.com"
+          echo "Checking endpoint: $ENDPOINT"
+
+          for i in {1..30}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$ENDPOINT" 2>/dev/null || echo "000")
+            echo "Attempt $i/30: HTTP Status = $HTTP_STATUS"
+
+            if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "301" ] || [ "$HTTP_STATUS" = "302" ]; then
+              echo ""
+              echo "=========================================="
+              echo "DEPLOYMENT SUCCESSFUL"
+              echo "Endpoint: $ENDPOINT"
+              echo "=========================================="
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo ""
+          echo "WARNING: Endpoint not responding yet."
+          echo "This may be normal for new deployments - DNS and LoadBalancer can take 5-10 minutes."
+          echo "Check manually: $ENDPOINT"

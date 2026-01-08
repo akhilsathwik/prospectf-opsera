@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: prospectf500-app1-dev
+
+resources:
+  - ../../base
+
+# Image tags will be updated by GitHub Actions workflow
+images:
+  - name: ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
+    newName: ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-frontend
+    newName: ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-frontend
+    newTag: latest

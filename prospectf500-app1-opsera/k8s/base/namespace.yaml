@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prospectf500-app1-dev
+  labels:
+    app-identifier: prospectf500-app1
+    environment: dev
+    deployment-name: prospectf500-app1-opsera
+    managed-by: opsera-gitops
+    created-by: claude-code
+    tenant: opsera-se
