@@ -172,7 +172,8 @@ jobs:
       - name: Check if workload cluster exists
         id: check-cluster
         run: |
-          if aws eks describe-cluster --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          # Use shortened cluster name: prospectf500-app1-wrk-dev
+          if aws eks describe-cluster --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
             echo "cluster_exists=true" >> $GITHUB_OUTPUT
             echo "Workload cluster found"
           else
@@ -183,7 +184,8 @@ jobs:
       - name: Configure kubectl
         if: steps.check-cluster.outputs.cluster_exists == 'true'
         run: |
-          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
+          # Use shortened cluster name: prospectf500-app1-wrk-dev
+          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
 
       - name: Deploy with Kustomize
         if: steps.check-cluster.outputs.cluster_exists == 'true'
