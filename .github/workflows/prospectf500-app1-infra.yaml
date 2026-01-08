@@ -12,6 +12,11 @@ on:
           - plan
           - apply
           - destroy
+      branch:
+        description: 'Branch to use (default: prospectf500-app1-opsera)'
+        required: false
+        default: 'prospectf500-app1-opsera'
+        type: string
 
 env:
   AWS_REGION: eu-north-1
