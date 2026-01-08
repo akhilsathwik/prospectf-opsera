@@ -114,20 +114,28 @@ jobs:
           IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
           APP_IDENTIFIER="${{ env.APP_IDENTIFIER }}"
 
-          # Replace ALL instances of ACCOUNT_ID placeholder (Fix #81)
-          sed -i "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" kustomization.yaml
+          echo "Replacing placeholders:"
+          echo "  ECR_REGISTRY: $ECR_REGISTRY"
+          echo "  IMAGE_TAG: $IMAGE_TAG"
+          echo "  APP_IDENTIFIER: $APP_IDENTIFIER"
 
-          # Update backend image newName (Fix #82: Update ALL images)
+          # Replace ECR_REGISTRY placeholder (handles both placeholder and hardcoded values)
+          sed -i "s|ECR_REGISTRY|${ECR_REGISTRY}|g" kustomization.yaml
+          
+          # Also replace any hardcoded account IDs with current account ID
+          sed -i "s|[0-9]\{12\}\.dkr\.ecr\.|${AWS_ACCOUNT_ID}.dkr.ecr.|g" kustomization.yaml
+
+          # Update backend image newName (ensure correct format)
           sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
 
-          # Update frontend image newName (Fix #82: Update ALL images)
+          # Update frontend image newName (ensure correct format)
           sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
 
           # Update ALL tags
           sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
 
-          # Validate no placeholders remain (Fix #81)
-          if grep -q "ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
+          # Validate no placeholders remain
+          if grep -q "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
             echo "ERROR: Placeholders found in kustomization.yaml"
             cat kustomization.yaml
             exit 1
@@ -330,6 +338,85 @@ jobs:
             kubectl get rs -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -l app=${{ env.APP_IDENTIFIER }}-frontend
             exit 1
           }
+
+      - name: Verify pods are running (fail job if not)
+        if: steps.check-cluster.outputs.cluster_exists == 'true'
+        run: |
+          echo "=== CRITICAL: Verifying pods are running ==="
+          echo ""
+          
+          # Check backend pods
+          BACKEND_READY=$(kubectl get deployment ${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+          BACKEND_DESIRED=$(kubectl get deployment ${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+          
+          echo "Backend: $BACKEND_READY/$BACKEND_DESIRED pods ready"
+          
+          # Check frontend pods
+          FRONTEND_READY=$(kubectl get deployment ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+          FRONTEND_DESIRED=$(kubectl get deployment ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+          
+          echo "Frontend: $FRONTEND_READY/$FRONTEND_DESIRED pods ready"
+          echo ""
+          
+          # Get pod status details
+          echo "=== Current Pod Status ==="
+          kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o wide
+          echo ""
+          
+          # Check for failed pods
+          FAILED_PODS=$(kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --field-selector=status.phase!=Running,status.phase!=Succeeded -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+          
+          if [ -n "$FAILED_PODS" ]; then
+            echo "❌ FAILED/PENDING PODS DETECTED: $FAILED_PODS"
+            echo ""
+            for POD in $FAILED_PODS; do
+              echo "=== Pod: $POD ==="
+              POD_STATUS=$(kubectl get pod $POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+              echo "Status: $POD_STATUS"
+              
+              # Get pod events
+              echo "Events:"
+              kubectl describe pod $POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} | grep -A 10 "Events:" || true
+              
+              # Check for specific error types
+              if kubectl get pod $POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null | grep -q "ImagePullBackOff\|ErrImagePull"; then
+                echo ""
+                echo "⚠ IMAGE PULL ERROR: Pod cannot pull image from ECR"
+                echo "Check:"
+                echo "  1. ECR repository exists and image tag is correct"
+                echo "  2. Node group IAM role has ECR read permissions"
+                echo "  3. Image was successfully pushed to ECR"
+              fi
+              
+              if kubectl get pod $POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null | grep -q "CrashLoopBackOff"; then
+                echo ""
+                echo "⚠ CONTAINER CRASH: Container starts but crashes immediately"
+                echo "Check pod logs for application errors:"
+                kubectl logs $POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --tail=20 2>&1 || echo "Could not get logs"
+              fi
+              
+              echo ""
+            done
+          fi
+          
+          # Fail if pods aren't ready
+          if [ "$BACKEND_READY" != "$BACKEND_DESIRED" ] || [ "$FRONTEND_READY" != "$FRONTEND_DESIRED" ]; then
+            echo ""
+            echo "❌ DEPLOYMENT FAILED: Pods are not running"
+            echo ""
+            echo "Backend: $BACKEND_READY/$BACKEND_DESIRED ready"
+            echo "Frontend: $FRONTEND_READY/$FRONTEND_DESIRED ready"
+            echo ""
+            echo "Please check the 'Check pod status and events' step above for detailed diagnostics."
+            echo ""
+            echo "Common issues:"
+            echo "  1. ImagePullBackOff: Cannot pull image from ECR (check permissions/image name)"
+            echo "  2. CrashLoopBackOff: Container crashes on startup (check application logs)"
+            echo "  3. Pending: Resource constraints or scheduling issues"
+            exit 1
+          else
+            echo "✓ All pods are running successfully!"
+          fi
 
       - name: Get deployment status
         if: steps.check-cluster.outputs.cluster_exists == 'true'
