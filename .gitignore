@@ -28,3 +28,8 @@ build/
 # Logs
 *.log
 npm-debug.log*
+
+# Sensitive files - Access keys and credentials
+*accessKeys*.csv
+*credentials*.csv
+*.csv
