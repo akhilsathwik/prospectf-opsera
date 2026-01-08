@@ -209,10 +209,10 @@ jobs:
       - name: Install ArgoCD
         run: |
           echo "Creating argocd namespace..."
-          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f --validate=false
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply --validate=false -f -
 
           echo "Installing ArgoCD..."
-          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --validate=false
+          kubectl apply --validate=false -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
           echo "Waiting for ArgoCD to be ready..."
           kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
@@ -302,7 +302,7 @@ jobs:
 
       - name: Install ExternalDNS
         run: |
-          cat <<EOF | kubectl apply -f - --validate=false
+          cat <<EOF | kubectl apply --validate=false -f -
           apiVersion: v1
           kind: ServiceAccount
           metadata:
