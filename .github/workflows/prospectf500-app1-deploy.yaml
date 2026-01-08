@@ -115,31 +115,43 @@ jobs:
           APP_IDENTIFIER="${{ env.APP_IDENTIFIER }}"
 
           echo "Replacing placeholders:"
+          echo "  AWS_ACCOUNT_ID: $AWS_ACCOUNT_ID"
           echo "  ECR_REGISTRY: $ECR_REGISTRY"
           echo "  IMAGE_TAG: $IMAGE_TAG"
           echo "  APP_IDENTIFIER: $APP_IDENTIFIER"
 
-          # Replace ECR_REGISTRY placeholder (handles both placeholder and hardcoded values)
+          # CRITICAL: Replace ACCOUNT_ID placeholder first (if it exists from old deployments)
+          sed -i "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" kustomization.yaml
+          
+          # Replace ECR_REGISTRY placeholder
           sed -i "s|ECR_REGISTRY|${ECR_REGISTRY}|g" kustomization.yaml
           
-          # Also replace any hardcoded account IDs with current account ID
+          # Also replace any hardcoded account IDs with current account ID (in case of mismatches)
           sed -i "s|[0-9]\{12\}\.dkr\.ecr\.|${AWS_ACCOUNT_ID}.dkr.ecr.|g" kustomization.yaml
 
-          # Update backend image newName (ensure correct format)
+          # Update backend image newName (ensure correct format - handles any existing format)
           sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
 
-          # Update frontend image newName (ensure correct format)
+          # Update frontend image newName (ensure correct format - handles any existing format)
           sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
 
           # Update ALL tags
           sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
 
+          echo ""
+          echo "=== Updated kustomization.yaml ==="
+          cat kustomization.yaml
+          echo ""
+
           # Validate no placeholders remain
           if grep -q "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
-            echo "ERROR: Placeholders found in kustomization.yaml"
-            cat kustomization.yaml
+            echo "ERROR: Placeholders found in kustomization.yaml after replacement!"
+            echo "Remaining placeholders:"
+            grep -n "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml || true
             exit 1
           fi
+          
+          echo "✓ All placeholders replaced successfully"
 
           echo "Updated kustomization.yaml:"
           cat kustomization.yaml
@@ -224,12 +236,68 @@ jobs:
         if: steps.check-cluster.outputs.cluster_exists == 'true'
         run: |
           echo "Deploying to namespace: ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}"
+          
+          # Get expected image names
+          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
+          ECR_REGISTRY="${{ needs.build-and-push.outputs.ecr_registry }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          
+          echo "Expected images:"
+          echo "  Backend: ${ECR_REGISTRY}/${{ env.APP_IDENTIFIER }}-backend:${IMAGE_TAG}"
+          echo "  Frontend: ${ECR_REGISTRY}/${{ env.APP_IDENTIFIER }}-frontend:${IMAGE_TAG}"
+          echo ""
+          
+          # Apply deployment
           kubectl apply -k prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
           
           echo ""
           echo "=== Deployment Applied ==="
           kubectl get deployments -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
           kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+          
+          echo ""
+          echo "=== Verifying deployed image names ==="
+          BACKEND_IMAGE=$(kubectl get deployment ${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+          FRONTEND_IMAGE=$(kubectl get deployment ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+          
+          echo "Backend image: $BACKEND_IMAGE"
+          echo "Frontend image: $FRONTEND_IMAGE"
+          echo ""
+          
+          # Check if images contain placeholders
+          if echo "$BACKEND_IMAGE" | grep -q "ACCOUNT_ID\|ECR_REGISTRY\|PLACEHOLDER"; then
+            echo "❌ ERROR: Backend deployment still contains placeholders!"
+            echo "Image: $BACKEND_IMAGE"
+            echo "This means kustomization.yaml was not updated correctly."
+            exit 1
+          fi
+          
+          if echo "$FRONTEND_IMAGE" | grep -q "ACCOUNT_ID\|ECR_REGISTRY\|PLACEHOLDER"; then
+            echo "❌ ERROR: Frontend deployment still contains placeholders!"
+            echo "Image: $FRONTEND_IMAGE"
+            echo "This means kustomization.yaml was not updated correctly."
+            exit 1
+          fi
+          
+          # Check if images match expected format
+          EXPECTED_BACKEND="${ECR_REGISTRY}/${{ env.APP_IDENTIFIER }}-backend:${IMAGE_TAG}"
+          EXPECTED_FRONTEND="${ECR_REGISTRY}/${{ env.APP_IDENTIFIER }}-frontend:${IMAGE_TAG}"
+          
+          if [ "$BACKEND_IMAGE" != "$EXPECTED_BACKEND" ]; then
+            echo "⚠ WARNING: Backend image doesn't match expected:"
+            echo "  Expected: $EXPECTED_BACKEND"
+            echo "  Actual: $BACKEND_IMAGE"
+            echo "  (This might be from a previous deployment - will be updated on next rollout)"
+          fi
+          
+          if [ "$FRONTEND_IMAGE" != "$EXPECTED_FRONTEND" ]; then
+            echo "⚠ WARNING: Frontend image doesn't match expected:"
+            echo "  Expected: $EXPECTED_FRONTEND"
+            echo "  Actual: $FRONTEND_IMAGE"
+            echo "  (This might be from a previous deployment - will be updated on next rollout)"
+          fi
+          
+          echo "✓ Image names verified"
 
       - name: Check pod status and events
         if: steps.check-cluster.outputs.cluster_exists == 'true'
