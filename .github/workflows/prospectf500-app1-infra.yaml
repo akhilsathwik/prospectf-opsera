@@ -112,6 +112,13 @@ jobs:
         if: ${{ github.event.inputs.action == 'apply' }}
         run: terraform apply -auto-approve tfplan
 
+      - name: Wait for cluster endpoint updates to propagate
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          echo "Waiting for EKS endpoint updates to propagate (this can take 2-5 minutes)..."
+          sleep 120
+          echo "✓ Waiting period complete"
+
       - name: Terraform Destroy
         if: ${{ github.event.inputs.action == 'destroy' }}
         run: terraform destroy -auto-approve
@@ -153,23 +160,51 @@ jobs:
           aws eks wait cluster-active --name ${{ env.APP_IDENTIFIER }}-cd --region ${{ env.AWS_REGION }}
           echo "ArgoCD cluster is ACTIVE"
 
+      - name: Verify ArgoCD cluster has public endpoint
+        run: |
+          echo "Checking cluster endpoint configuration..."
+          ENDPOINT_TYPE=$(aws eks describe-cluster --name ${{ env.APP_IDENTIFIER }}-cd --region ${{ env.AWS_REGION }} --query 'cluster.resourcesVpcConfig.endpointPublicAccess' --output text)
+          echo "Public endpoint enabled: $ENDPOINT_TYPE"
+          if [ "$ENDPOINT_TYPE" != "True" ]; then
+            echo "ERROR: Cluster does not have public endpoint enabled. Run Terraform apply to update it."
+            exit 1
+          fi
+          echo "✓ Public endpoint is enabled"
+
       - name: Configure kubectl for ArgoCD cluster
         run: |
           # Use shortened cluster name: prospectf500-app1-cd
+          # Force use of public endpoint
           aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-cd --region ${{ env.AWS_REGION }}
+          
+          # Verify we're using public endpoint
+          echo "Current kubeconfig endpoint:"
+          kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' || true
+          echo ""
 
       - name: Wait for ArgoCD API server to be ready
         run: |
           echo "Waiting for API server to be accessible..."
-          for i in {1..30}; do
-            if kubectl cluster-info --request-timeout=10s 2>/dev/null; then
-              echo "✓ API server is ready"
+          MAX_ATTEMPTS=60
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            if kubectl cluster-info --request-timeout=15s 2>&1 | grep -q "Kubernetes control plane"; then
+              echo "✓ API server is ready and accessible"
+              kubectl cluster-info
               exit 0
             fi
-            echo "Attempt $i/30: API server not ready yet, waiting 10s..."
-            sleep 10
+            ERROR=$(kubectl cluster-info --request-timeout=5s 2>&1 || true)
+            if echo "$ERROR" | grep -q "dial tcp.*i/o timeout"; then
+              echo "Attempt $i/$MAX_ATTEMPTS: Connection timeout, waiting 15s..."
+            elif echo "$ERROR" | grep -q "Forbidden\|403"; then
+              echo "Attempt $i/$MAX_ATTEMPTS: Authentication issue, waiting 15s..."
+            else
+              echo "Attempt $i/$MAX_ATTEMPTS: API server not ready, waiting 15s..."
+            fi
+            sleep 15
           done
-          echo "WARNING: API server may not be fully ready, continuing anyway..."
+          echo "ERROR: API server not accessible after $MAX_ATTEMPTS attempts"
+          echo "This may indicate the cluster endpoint is not public or not ready"
+          exit 1
 
       - name: Install ArgoCD
         run: |
@@ -208,23 +243,51 @@ jobs:
           aws eks wait cluster-active --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
           echo "Workload cluster is ACTIVE"
 
+      - name: Verify Workload cluster has public endpoint
+        run: |
+          echo "Checking cluster endpoint configuration..."
+          ENDPOINT_TYPE=$(aws eks describe-cluster --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }} --query 'cluster.resourcesVpcConfig.endpointPublicAccess' --output text)
+          echo "Public endpoint enabled: $ENDPOINT_TYPE"
+          if [ "$ENDPOINT_TYPE" != "True" ]; then
+            echo "ERROR: Cluster does not have public endpoint enabled. Run Terraform apply to update it."
+            exit 1
+          fi
+          echo "✓ Public endpoint is enabled"
+
       - name: Configure kubectl for Workload cluster
         run: |
           # Use shortened cluster name: prospectf500-app1-wrk-dev
+          # Force use of public endpoint
           aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
+          
+          # Verify we're using public endpoint
+          echo "Current kubeconfig endpoint:"
+          kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' || true
+          echo ""
 
       - name: Wait for Workload API server to be ready
         run: |
           echo "Waiting for API server to be accessible..."
-          for i in {1..30}; do
-            if kubectl cluster-info --request-timeout=10s 2>/dev/null; then
-              echo "✓ API server is ready"
+          MAX_ATTEMPTS=60
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            if kubectl cluster-info --request-timeout=15s 2>&1 | grep -q "Kubernetes control plane"; then
+              echo "✓ API server is ready and accessible"
+              kubectl cluster-info
               exit 0
             fi
-            echo "Attempt $i/30: API server not ready yet, waiting 10s..."
-            sleep 10
+            ERROR=$(kubectl cluster-info --request-timeout=5s 2>&1 || true)
+            if echo "$ERROR" | grep -q "dial tcp.*i/o timeout"; then
+              echo "Attempt $i/$MAX_ATTEMPTS: Connection timeout, waiting 15s..."
+            elif echo "$ERROR" | grep -q "Forbidden\|403"; then
+              echo "Attempt $i/$MAX_ATTEMPTS: Authentication issue, waiting 15s..."
+            else
+              echo "Attempt $i/$MAX_ATTEMPTS: API server not ready, waiting 15s..."
+            fi
+            sleep 15
           done
-          echo "WARNING: API server may not be fully ready, continuing anyway..."
+          echo "ERROR: API server not accessible after $MAX_ATTEMPTS attempts"
+          echo "This may indicate the cluster endpoint is not public or not ready"
+          exit 1
 
       - name: Get ExternalDNS role ARN
         id: get-role
