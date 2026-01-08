@@ -135,8 +135,8 @@ jobs:
           # Update frontend image newName (ensure correct format - handles any existing format)
           sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
 
-          # Update ALL tags
-          sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
+          # Update ALL tags (ensure it's quoted as string to avoid scientific notation issues)
+          sed -i "s|newTag: .*|newTag: \"${IMAGE_TAG}\"|g" kustomization.yaml
 
           echo ""
           echo "=== Updated kustomization.yaml ==="
@@ -271,8 +271,8 @@ jobs:
           sed -i "s|newName:.*${APP_IDENTIFIER}-backend.*|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
           sed -i "s|newName:.*${APP_IDENTIFIER}-frontend.*|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
           
-          # Update tags - match any tag value
-          sed -i "s|newTag:.*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
+          # Update tags - match any tag value (ensure it's quoted as string)
+          sed -i "s|newTag:.*|newTag: \"${IMAGE_TAG}\"|g" kustomization.yaml
           
           # Double-check: replace any remaining ACCOUNT_ID that might have been introduced
           sed -i "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" kustomization.yaml
