@@ -17,7 +17,9 @@ spec:
     targetRevision: prospectf500-app1-opsera
     path: prospectf500-app1-opsera/k8s/overlays/dev
   destination:
-    server: https://kubernetes.default.svc
+    # For greenfield pattern: Deploy to workload cluster registered with ArgoCD
+    # The cluster name matches the one registered in setup-argocd-app job
+    name: prospectf500-app1-wrk-dev
     namespace: prospectf500-app1-dev
   syncPolicy:
     automated:
