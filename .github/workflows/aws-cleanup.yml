@@ -1,0 +1,750 @@
+name: AWS Resource Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run mode (preview only, no deletions)'
+        required: true
+        type: boolean
+        default: true
+      resource_types:
+        description: 'Resources to clean up (comma-separated: ec2,eks,ecr,s3,rds,elasticache,lambda,ecs,cloudformation,loadbalancers,all)'
+        required: true
+        type: string
+        default: 'all'
+      confirm_cleanup:
+        description: 'Type CONFIRM to proceed with cleanup'
+        required: true
+        type: string
+        default: ''
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC (dry-run only for reporting)
+    - cron: '0 2 * * 0'
+
+env:
+  AWS_REGIONS: "ap-south-1,sa-east-1,ap-southeast-1,eu-west-1,eu-west-2,eu-west-3,eu-north-1,us-west-2"
+
+jobs:
+  validate:
+    name: Validate Cleanup Request
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      dry_run: ${{ steps.check.outputs.dry_run }}
+    steps:
+      - name: Validate confirmation
+        id: check
+        run: |
+          # For scheduled runs, always dry-run
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "proceed=true" >> $GITHUB_OUTPUT
+            echo "dry_run=true" >> $GITHUB_OUTPUT
+            echo "Scheduled run - dry-run mode enabled"
+            exit 0
+          fi
+
+          # For manual runs, check confirmation
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "proceed=true" >> $GITHUB_OUTPUT
+            echo "dry_run=true" >> $GITHUB_OUTPUT
+            echo "Dry run mode - no confirmation needed"
+          elif [ "${{ inputs.confirm_cleanup }}" = "CONFIRM" ]; then
+            echo "proceed=true" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+            echo "Confirmation received - proceeding with cleanup"
+          else
+            echo "proceed=false" >> $GITHUB_OUTPUT
+            echo "dry_run=true" >> $GITHUB_OUTPUT
+            echo "::error::For actual cleanup, type 'CONFIRM' in the confirmation field"
+            exit 1
+          fi
+
+  cleanup:
+    name: Cleanup ${{ matrix.region }}
+    needs: validate
+    if: needs.validate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        region:
+          - ap-south-1
+          - sa-east-1
+          - ap-southeast-1
+          - eu-west-1
+          - eu-west-2
+          - eu-west-3
+          - eu-north-1
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ matrix.region }}
+
+      - name: Set cleanup mode
+        id: mode
+        run: |
+          if [ "${{ needs.validate.outputs.dry_run }}" = "true" ]; then
+            echo "mode=DRY-RUN" >> $GITHUB_OUTPUT
+            echo "delete_flag=" >> $GITHUB_OUTPUT
+          else
+            echo "mode=DELETE" >> $GITHUB_OUTPUT
+            echo "delete_flag=--force" >> $GITHUB_OUTPUT
+          fi
+
+          RESOURCES="${{ inputs.resource_types }}"
+          if [ -z "$RESOURCES" ] || [ "$RESOURCES" = "all" ]; then
+            RESOURCES="ec2,eks,ecr,s3,rds,elasticache,lambda,ecs,cloudformation,loadbalancers"
+          fi
+          echo "resources=$RESOURCES" >> $GITHUB_OUTPUT
+
+      - name: Cleanup EC2 Instances
+        if: contains(steps.mode.outputs.resources, 'ec2') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] EC2 Instances in ${{ matrix.region }} ==="
+
+          # Get all running/stopped instances
+          INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=instance-state-name,Values=running,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text)
+
+          if [ -z "$INSTANCES" ]; then
+            echo "No EC2 instances found"
+          else
+            echo "Found instances: $INSTANCES"
+            for INSTANCE in $INSTANCES; do
+              echo "Processing instance: $INSTANCE"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws ec2 terminate-instances --instance-ids $INSTANCE
+                echo "Terminated: $INSTANCE"
+              fi
+            done
+          fi
+
+          # Cleanup EBS volumes
+          echo "=== [${{ steps.mode.outputs.mode }}] EBS Volumes ==="
+          VOLUMES=$(aws ec2 describe-volumes \
+            --filters "Name=status,Values=available" \
+            --query 'Volumes[].VolumeId' \
+            --output text)
+
+          if [ -z "$VOLUMES" ]; then
+            echo "No available EBS volumes found"
+          else
+            echo "Found volumes: $VOLUMES"
+            for VOL in $VOLUMES; do
+              echo "Processing volume: $VOL"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws ec2 delete-volume --volume-id $VOL
+                echo "Deleted: $VOL"
+              fi
+            done
+          fi
+
+          # Cleanup Elastic IPs
+          echo "=== [${{ steps.mode.outputs.mode }}] Elastic IPs ==="
+          EIPS=$(aws ec2 describe-addresses \
+            --query 'Addresses[?AssociationId==`null`].AllocationId' \
+            --output text)
+
+          if [ -z "$EIPS" ]; then
+            echo "No unassociated Elastic IPs found"
+          else
+            echo "Found EIPs: $EIPS"
+            for EIP in $EIPS; do
+              echo "Processing EIP: $EIP"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws ec2 release-address --allocation-id $EIP
+                echo "Released: $EIP"
+              fi
+            done
+          fi
+
+      - name: Cleanup EKS Clusters
+        if: contains(steps.mode.outputs.resources, 'eks') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] EKS Clusters in ${{ matrix.region }} ==="
+
+          CLUSTERS=$(aws eks list-clusters --query 'clusters[]' --output text 2>/dev/null || echo "")
+
+          if [ -z "$CLUSTERS" ]; then
+            echo "No EKS clusters found"
+          else
+            echo "Found clusters: $CLUSTERS"
+            for CLUSTER in $CLUSTERS; do
+              echo "Processing cluster: $CLUSTER"
+
+              # Delete node groups first
+              NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER --query 'nodegroups[]' --output text 2>/dev/null || echo "")
+              NODEGROUP_LIST=""
+              for NG in $NODEGROUPS; do
+                echo "  Node group: $NG"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws eks delete-nodegroup --cluster-name $CLUSTER --nodegroup-name $NG 2>/dev/null || true
+                  echo "  Initiated deletion of nodegroup: $NG"
+                  NODEGROUP_LIST="$NODEGROUP_LIST $NG"
+                fi
+              done
+
+              # Delete Fargate profiles
+              PROFILES=$(aws eks list-fargate-profiles --cluster-name $CLUSTER --query 'fargateProfileNames[]' --output text 2>/dev/null || echo "")
+              PROFILE_LIST=""
+              for PROFILE in $PROFILES; do
+                echo "  Fargate profile: $PROFILE"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws eks delete-fargate-profile --cluster-name $CLUSTER --fargate-profile-name $PROFILE 2>/dev/null || true
+                  echo "  Initiated deletion of profile: $PROFILE"
+                  PROFILE_LIST="$PROFILE_LIST $PROFILE"
+                fi
+              done
+
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                # Wait for each nodegroup to be fully deleted (with timeout)
+                for NG in $NODEGROUP_LIST; do
+                  echo "  Waiting for nodegroup $NG to delete (max 10 min)..."
+                  aws eks wait nodegroup-deleted --cluster-name $CLUSTER --nodegroup-name $NG 2>/dev/null || echo "  Nodegroup $NG deletion wait completed or timed out"
+                done
+
+                # Wait for each Fargate profile to be fully deleted
+                for PROFILE in $PROFILE_LIST; do
+                  echo "  Waiting for Fargate profile $PROFILE to delete (max 10 min)..."
+                  aws eks wait fargate-profile-deleted --cluster-name $CLUSTER --fargate-profile-name $PROFILE 2>/dev/null || echo "  Profile $PROFILE deletion wait completed or timed out"
+                done
+
+                # Retry cluster deletion with backoff
+                echo "Attempting to delete cluster: $CLUSTER"
+                for i in 1 2 3; do
+                  if aws eks delete-cluster --name $CLUSTER 2>/dev/null; then
+                    echo "Deleted cluster: $CLUSTER"
+                    break
+                  else
+                    echo "  Attempt $i failed, waiting 30s before retry..."
+                    sleep 30
+                  fi
+                done
+              fi
+            done
+          fi
+
+      - name: Cleanup ECR Repositories
+        if: contains(steps.mode.outputs.resources, 'ecr') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] ECR Repositories in ${{ matrix.region }} ==="
+
+          REPOS=$(aws ecr describe-repositories --query 'repositories[].repositoryName' --output text 2>/dev/null || echo "")
+
+          if [ -z "$REPOS" ]; then
+            echo "No ECR repositories found"
+          else
+            echo "Found repositories: $REPOS"
+            for REPO in $REPOS; do
+              echo "Processing repository: $REPO"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws ecr delete-repository --repository-name $REPO --force
+                echo "Deleted: $REPO"
+              fi
+            done
+          fi
+
+      - name: Cleanup RDS Instances
+        if: contains(steps.mode.outputs.resources, 'rds') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] RDS Instances in ${{ matrix.region }} ==="
+
+          # RDS Instances
+          INSTANCES=$(aws rds describe-db-instances --query 'DBInstances[].DBInstanceIdentifier' --output text 2>/dev/null || echo "")
+
+          if [ -z "$INSTANCES" ]; then
+            echo "No RDS instances found"
+          else
+            echo "Found RDS instances: $INSTANCES"
+            for DB in $INSTANCES; do
+              echo "Processing RDS instance: $DB"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws rds delete-db-instance --db-instance-identifier $DB --skip-final-snapshot --delete-automated-backups
+                echo "Deleted: $DB"
+              fi
+            done
+          fi
+
+          # RDS Clusters (Aurora)
+          CLUSTERS=$(aws rds describe-db-clusters --query 'DBClusters[].DBClusterIdentifier' --output text 2>/dev/null || echo "")
+
+          if [ -z "$CLUSTERS" ]; then
+            echo "No RDS clusters found"
+          else
+            echo "Found RDS clusters: $CLUSTERS"
+            for CLUSTER in $CLUSTERS; do
+              echo "Processing RDS cluster: $CLUSTER"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws rds delete-db-cluster --db-cluster-identifier $CLUSTER --skip-final-snapshot
+                echo "Deleted: $CLUSTER"
+              fi
+            done
+          fi
+
+      - name: Cleanup ElastiCache
+        if: contains(steps.mode.outputs.resources, 'elasticache') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] ElastiCache in ${{ matrix.region }} ==="
+
+          # Replication Groups
+          REPGROUPS=$(aws elasticache describe-replication-groups --query 'ReplicationGroups[].ReplicationGroupId' --output text 2>/dev/null || echo "")
+
+          if [ -z "$REPGROUPS" ]; then
+            echo "No ElastiCache replication groups found"
+          else
+            echo "Found replication groups: $REPGROUPS"
+            for RG in $REPGROUPS; do
+              echo "Processing replication group: $RG"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws elasticache delete-replication-group --replication-group-id $RG --no-retain-primary-cluster
+                echo "Deleted: $RG"
+              fi
+            done
+          fi
+
+          # Cache Clusters
+          CLUSTERS=$(aws elasticache describe-cache-clusters --query 'CacheClusters[].CacheClusterId' --output text 2>/dev/null || echo "")
+
+          if [ -z "$CLUSTERS" ]; then
+            echo "No ElastiCache clusters found"
+          else
+            echo "Found cache clusters: $CLUSTERS"
+            for CC in $CLUSTERS; do
+              echo "Processing cache cluster: $CC"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws elasticache delete-cache-cluster --cache-cluster-id $CC
+                echo "Deleted: $CC"
+              fi
+            done
+          fi
+
+      - name: Cleanup Lambda Functions
+        if: contains(steps.mode.outputs.resources, 'lambda') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] Lambda Functions in ${{ matrix.region }} ==="
+
+          FUNCTIONS=$(aws lambda list-functions --query 'Functions[].FunctionName' --output text 2>/dev/null || echo "")
+
+          if [ -z "$FUNCTIONS" ]; then
+            echo "No Lambda functions found"
+          else
+            echo "Found functions: $FUNCTIONS"
+            for FUNC in $FUNCTIONS; do
+              echo "Processing function: $FUNC"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws lambda delete-function --function-name $FUNC
+                echo "Deleted: $FUNC"
+              fi
+            done
+          fi
+
+      - name: Cleanup ECS Resources
+        if: contains(steps.mode.outputs.resources, 'ecs') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] ECS Resources in ${{ matrix.region }} ==="
+
+          # ECS Clusters
+          CLUSTERS=$(aws ecs list-clusters --query 'clusterArns[]' --output text 2>/dev/null || echo "")
+
+          if [ -z "$CLUSTERS" ]; then
+            echo "No ECS clusters found"
+          else
+            echo "Found ECS clusters: $CLUSTERS"
+            for CLUSTER in $CLUSTERS; do
+              CLUSTER_NAME=$(echo $CLUSTER | awk -F'/' '{print $NF}')
+              echo "Processing cluster: $CLUSTER_NAME"
+
+              # Stop all services first
+              SERVICES=$(aws ecs list-services --cluster $CLUSTER --query 'serviceArns[]' --output text 2>/dev/null || echo "")
+              for SVC in $SERVICES; do
+                SVC_NAME=$(echo $SVC | awk -F'/' '{print $NF}')
+                echo "  Service: $SVC_NAME"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ecs update-service --cluster $CLUSTER --service $SVC --desired-count 0 2>/dev/null || true
+                  aws ecs delete-service --cluster $CLUSTER --service $SVC --force 2>/dev/null || true
+                  echo "  Deleted service: $SVC_NAME"
+                fi
+              done
+
+              # Stop all tasks
+              TASKS=$(aws ecs list-tasks --cluster $CLUSTER --query 'taskArns[]' --output text 2>/dev/null || echo "")
+              for TASK in $TASKS; do
+                echo "  Task: $TASK"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ecs stop-task --cluster $CLUSTER --task $TASK 2>/dev/null || true
+                  echo "  Stopped task: $TASK"
+                fi
+              done
+
+              # Deregister container instances (required before cluster deletion)
+              INSTANCES=$(aws ecs list-container-instances --cluster $CLUSTER --query 'containerInstanceArns[]' --output text 2>/dev/null || echo "")
+              for INSTANCE in $INSTANCES; do
+                echo "  Container instance: $INSTANCE"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ecs deregister-container-instance --cluster $CLUSTER --container-instance $INSTANCE --force 2>/dev/null || true
+                  echo "  Deregistered instance: $INSTANCE"
+                fi
+              done
+
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                # Wait for instances to drain
+                sleep 10
+                aws ecs delete-cluster --cluster $CLUSTER 2>/dev/null || echo "  Warning: Could not delete cluster $CLUSTER_NAME (may have dependencies)"
+                echo "Deleted cluster: $CLUSTER_NAME"
+              fi
+            done
+          fi
+
+      - name: Cleanup Load Balancers
+        if: contains(steps.mode.outputs.resources, 'loadbalancers') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] Load Balancers in ${{ matrix.region }} ==="
+
+          # Application/Network Load Balancers (v2)
+          ALBS=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerArn' --output text 2>/dev/null || echo "")
+
+          if [ -z "$ALBS" ]; then
+            echo "No ALB/NLB load balancers found"
+          else
+            echo "Found ALB/NLB: $ALBS"
+            for ALB in $ALBS; do
+              ALB_NAME=$(echo $ALB | awk -F'/' '{print $(NF-1)}')
+              echo "Processing ALB/NLB: $ALB_NAME"
+
+              # Delete listeners first
+              LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn $ALB --query 'Listeners[].ListenerArn' --output text 2>/dev/null || echo "")
+              for LISTENER in $LISTENERS; do
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws elbv2 delete-listener --listener-arn $LISTENER
+                fi
+              done
+
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws elbv2 delete-load-balancer --load-balancer-arn $ALB
+                echo "Deleted: $ALB_NAME"
+              fi
+            done
+          fi
+
+          # Target Groups
+          TGS=$(aws elbv2 describe-target-groups --query 'TargetGroups[].TargetGroupArn' --output text 2>/dev/null || echo "")
+
+          if [ -z "$TGS" ]; then
+            echo "No target groups found"
+          else
+            echo "Found target groups: $TGS"
+            for TG in $TGS; do
+              TG_NAME=$(echo $TG | awk -F'/' '{print $(NF-1)}')
+              echo "Processing target group: $TG_NAME"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws elbv2 delete-target-group --target-group-arn $TG 2>/dev/null || true
+                echo "Deleted: $TG_NAME"
+              fi
+            done
+          fi
+
+          # Classic Load Balancers
+          CLBS=$(aws elb describe-load-balancers --query 'LoadBalancerDescriptions[].LoadBalancerName' --output text 2>/dev/null || echo "")
+
+          if [ -z "$CLBS" ]; then
+            echo "No classic load balancers found"
+          else
+            echo "Found classic LBs: $CLBS"
+            for CLB in $CLBS; do
+              echo "Processing classic LB: $CLB"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws elb delete-load-balancer --load-balancer-name $CLB
+                echo "Deleted: $CLB"
+              fi
+            done
+          fi
+
+      - name: Cleanup CloudFormation Stacks
+        if: contains(steps.mode.outputs.resources, 'cloudformation') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] CloudFormation Stacks in ${{ matrix.region }} ==="
+
+          STACKS=$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE \
+            --query 'StackSummaries[].StackName' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$STACKS" ]; then
+            echo "No CloudFormation stacks found"
+          else
+            echo "Found stacks: $STACKS"
+            for STACK in $STACKS; do
+              echo "Processing stack: $STACK"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws cloudformation delete-stack --stack-name $STACK
+                echo "Deleted: $STACK"
+              fi
+            done
+          fi
+
+      - name: Cleanup S3 Buckets
+        if: contains(steps.mode.outputs.resources, 's3') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] S3 Buckets (region: ${{ matrix.region }}) ==="
+
+          # S3 is global but buckets have a region - only delete buckets in this region
+          BUCKETS=$(aws s3api list-buckets --query 'Buckets[].Name' --output text 2>/dev/null || echo "")
+
+          # Skip protected/AWS-managed buckets
+          SKIP_PATTERNS="elasticbeanstalk|aws-cloudtrail|config-bucket|cf-templates|codepipeline|cdk-|amplify-"
+
+          if [ -z "$BUCKETS" ]; then
+            echo "No S3 buckets found"
+          else
+            for BUCKET in $BUCKETS; do
+              # Skip AWS-managed buckets
+              if echo "$BUCKET" | grep -qE "$SKIP_PATTERNS"; then
+                echo "Skipping protected bucket: $BUCKET"
+                continue
+              fi
+
+              BUCKET_REGION=$(aws s3api get-bucket-location --bucket $BUCKET --query 'LocationConstraint' --output text 2>/dev/null || echo "unknown")
+              # Handle us-east-1 which returns 'null' or 'None'
+              if [ "$BUCKET_REGION" = "null" ] || [ "$BUCKET_REGION" = "None" ]; then
+                BUCKET_REGION="us-east-1"
+              fi
+
+              if [ "$BUCKET_REGION" = "${{ matrix.region }}" ]; then
+                echo "Processing bucket: $BUCKET (region: $BUCKET_REGION)"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  # Empty the bucket first
+                  aws s3 rm s3://$BUCKET --recursive 2>/dev/null || true
+                  # Delete versioned objects
+                  aws s3api list-object-versions --bucket $BUCKET --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' --output json 2>/dev/null | \
+                    jq -c '.Objects // [] | .[]' 2>/dev/null | while read obj; do
+                      KEY=$(echo $obj | jq -r '.Key')
+                      VER=$(echo $obj | jq -r '.VersionId')
+                      aws s3api delete-object --bucket $BUCKET --key "$KEY" --version-id "$VER" 2>/dev/null || true
+                    done
+                  # Delete delete markers
+                  aws s3api list-object-versions --bucket $BUCKET --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' --output json 2>/dev/null | \
+                    jq -c '.Objects // [] | .[]' 2>/dev/null | while read obj; do
+                      KEY=$(echo $obj | jq -r '.Key')
+                      VER=$(echo $obj | jq -r '.VersionId')
+                      aws s3api delete-object --bucket $BUCKET --key "$KEY" --version-id "$VER" 2>/dev/null || true
+                    done
+                  # Delete the bucket (skip if access denied)
+                  if aws s3api delete-bucket --bucket $BUCKET 2>/dev/null; then
+                    echo "Deleted: $BUCKET"
+                  else
+                    echo "Warning: Could not delete bucket $BUCKET (may be protected)"
+                  fi
+                fi
+              fi
+            done
+          fi
+
+      - name: Cleanup NAT Gateways
+        if: contains(steps.mode.outputs.resources, 'ec2') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] NAT Gateways in ${{ matrix.region }} ==="
+
+          NATS=$(aws ec2 describe-nat-gateways \
+            --filter "Name=state,Values=available" \
+            --query 'NatGateways[].NatGatewayId' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$NATS" ]; then
+            echo "No NAT Gateways found"
+          else
+            echo "Found NAT Gateways: $NATS"
+            for NAT in $NATS; do
+              echo "Processing NAT Gateway: $NAT"
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                aws ec2 delete-nat-gateway --nat-gateway-id $NAT
+                echo "Deleted: $NAT"
+              fi
+            done
+          fi
+
+      - name: Cleanup VPCs (non-default)
+        if: contains(steps.mode.outputs.resources, 'ec2') || contains(steps.mode.outputs.resources, 'all')
+        run: |
+          echo "=== [${{ steps.mode.outputs.mode }}] Non-default VPCs in ${{ matrix.region }} ==="
+
+          VPCS=$(aws ec2 describe-vpcs \
+            --filters "Name=is-default,Values=false" \
+            --query 'Vpcs[].VpcId' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$VPCS" ]; then
+            echo "No non-default VPCs found"
+          else
+            echo "Found VPCs: $VPCS"
+            for VPC in $VPCS; do
+              echo "Processing VPC: $VPC"
+
+              # First: Release all EIPs associated with this VPC (required before IGW detach)
+              echo "  Releasing Elastic IPs in VPC..."
+              EIPS=$(aws ec2 describe-addresses \
+                --filters "Name=domain,Values=vpc" \
+                --query "Addresses[?NetworkInterfaceId!=null].AllocationId" \
+                --output text 2>/dev/null || echo "")
+              for EIP in $EIPS; do
+                # Check if EIP is in this VPC by checking its network interface
+                ENI=$(aws ec2 describe-addresses --allocation-ids $EIP --query 'Addresses[0].NetworkInterfaceId' --output text 2>/dev/null || echo "")
+                if [ -n "$ENI" ] && [ "$ENI" != "None" ]; then
+                  ENI_VPC=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI --query 'NetworkInterfaces[0].VpcId' --output text 2>/dev/null || echo "")
+                  if [ "$ENI_VPC" = "$VPC" ]; then
+                    echo "    EIP: $EIP (in VPC)"
+                    if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                      aws ec2 disassociate-address --allocation-id $EIP 2>/dev/null || true
+                      aws ec2 release-address --allocation-id $EIP 2>/dev/null || true
+                    fi
+                  fi
+                fi
+              done
+
+              # Wait for NAT Gateways to be deleted (initiated earlier)
+              echo "  Waiting for NAT Gateways to delete..."
+              NATS=$(aws ec2 describe-nat-gateways \
+                --filter "Name=vpc-id,Values=$VPC" "Name=state,Values=available,pending,deleting" \
+                --query 'NatGateways[].NatGatewayId' \
+                --output text 2>/dev/null || echo "")
+              for NAT in $NATS; do
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ec2 delete-nat-gateway --nat-gateway-id $NAT 2>/dev/null || true
+                  echo "    Waiting for NAT Gateway $NAT..."
+                  aws ec2 wait nat-gateway-deleted --nat-gateway-ids $NAT 2>/dev/null || echo "    NAT Gateway wait timed out"
+                fi
+              done
+
+              # Delete VPC Endpoints
+              ENDPOINTS=$(aws ec2 describe-vpc-endpoints \
+                --filters "Name=vpc-id,Values=$VPC" \
+                --query 'VpcEndpoints[].VpcEndpointId' \
+                --output text 2>/dev/null || echo "")
+              for EP in $ENDPOINTS; do
+                echo "  VPC Endpoint: $EP"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ec2 delete-vpc-endpoints --vpc-endpoint-ids $EP 2>/dev/null || true
+                fi
+              done
+
+              # Delete Network Interfaces (ENIs)
+              ENIS=$(aws ec2 describe-network-interfaces \
+                --filters "Name=vpc-id,Values=$VPC" \
+                --query 'NetworkInterfaces[].NetworkInterfaceId' \
+                --output text 2>/dev/null || echo "")
+              for ENI in $ENIS; do
+                echo "  Network Interface: $ENI"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  # Detach if attached
+                  ATTACHMENT=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null || echo "")
+                  if [ -n "$ATTACHMENT" ] && [ "$ATTACHMENT" != "None" ]; then
+                    aws ec2 detach-network-interface --attachment-id $ATTACHMENT --force 2>/dev/null || true
+                    sleep 5
+                  fi
+                  aws ec2 delete-network-interface --network-interface-id $ENI 2>/dev/null || true
+                fi
+              done
+
+              # Delete Internet Gateways
+              IGWS=$(aws ec2 describe-internet-gateways \
+                --filters "Name=attachment.vpc-id,Values=$VPC" \
+                --query 'InternetGateways[].InternetGatewayId' \
+                --output text 2>/dev/null || echo "")
+              for IGW in $IGWS; do
+                echo "  Internet Gateway: $IGW"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ec2 detach-internet-gateway --internet-gateway-id $IGW --vpc-id $VPC 2>/dev/null || true
+                  aws ec2 delete-internet-gateway --internet-gateway-id $IGW 2>/dev/null || true
+                fi
+              done
+
+              # Delete Subnets
+              SUBNETS=$(aws ec2 describe-subnets \
+                --filters "Name=vpc-id,Values=$VPC" \
+                --query 'Subnets[].SubnetId' \
+                --output text 2>/dev/null || echo "")
+              for SUBNET in $SUBNETS; do
+                echo "  Subnet: $SUBNET"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ec2 delete-subnet --subnet-id $SUBNET 2>/dev/null || true
+                fi
+              done
+
+              # Delete Route Tables (non-main)
+              RTS=$(aws ec2 describe-route-tables \
+                --filters "Name=vpc-id,Values=$VPC" \
+                --query 'RouteTables[?Associations[0].Main!=`true`].RouteTableId' \
+                --output text 2>/dev/null || echo "")
+              for RT in $RTS; do
+                echo "  Route Table: $RT"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ec2 delete-route-table --route-table-id $RT 2>/dev/null || true
+                fi
+              done
+
+              # Delete Security Groups (non-default)
+              SGS=$(aws ec2 describe-security-groups \
+                --filters "Name=vpc-id,Values=$VPC" \
+                --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
+                --output text 2>/dev/null || echo "")
+              for SG in $SGS; do
+                echo "  Security Group: $SG"
+                if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                  aws ec2 delete-security-group --group-id $SG 2>/dev/null || true
+                fi
+              done
+
+              if [ "${{ needs.validate.outputs.dry_run }}" = "false" ]; then
+                if aws ec2 delete-vpc --vpc-id $VPC 2>/dev/null; then
+                  echo "Deleted VPC: $VPC"
+                else
+                  echo "Warning: Could not delete VPC $VPC (may have remaining dependencies)"
+                fi
+              fi
+            done
+          fi
+
+      - name: Generate Cleanup Summary
+        run: |
+          echo "================================================"
+          echo "Cleanup Summary for ${{ matrix.region }}"
+          echo "================================================"
+          echo "Mode: ${{ steps.mode.outputs.mode }}"
+          echo "Resources: ${{ steps.mode.outputs.resources }}"
+          echo "Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          echo "================================================"
+
+  summary:
+    name: Cleanup Summary
+    needs: [validate, cleanup]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Final Report
+        run: |
+          echo "========================================"
+          echo "  AWS Resource Cleanup Complete"
+          echo "========================================"
+          echo ""
+          echo "Regions processed:"
+          echo "  - ap-south-1"
+          echo "  - sa-east-1"
+          echo "  - ap-southeast-1"
+          echo "  - eu-west-1"
+          echo "  - eu-west-2"
+          echo "  - eu-west-3"
+          echo "  - eu-north-1"
+          echo "  - us-west-2"
+          echo ""
+          echo "Mode: ${{ needs.validate.outputs.dry_run == 'true' && 'DRY-RUN (preview only)' || 'DELETE (resources removed)' }}"
+          echo ""
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "========================================"

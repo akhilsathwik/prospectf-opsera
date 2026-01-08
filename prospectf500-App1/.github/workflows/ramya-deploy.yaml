@@ -1,0 +1,126 @@
+name: Build & Deploy - ramya
+
+on:
+  push:
+    branches:
+      - ramya-opsera
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'ramya-opsera/k8s/**'
+      - 'ramya-opsera/argocd/**'
+  workflow_dispatch:
+
+env:
+  TENANT: adlcteam
+  APP_IDENTIFIER: ramya
+  ENVIRONMENT: dev
+  AWS_REGION: us-east-1
+  DEPLOYMENT_NAME: ramya-opsera
+  NAMESPACE: ramya-dev
+
+jobs:
+  build-and-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Get ECR repository URLs
+        id: ecr
+        run: |
+          BACKEND_REPO=$(aws ecr describe-repositories --repository-names ${APP_IDENTIFIER}-backend --region ${AWS_REGION} --query 'repositories[0].repositoryUri' --output text)
+          FRONTEND_REPO=$(aws ecr describe-repositories --repository-names ${APP_IDENTIFIER}-frontend --region ${AWS_REGION} --query 'repositories[0].repositoryUri' --output text)
+          echo "backend_url=$BACKEND_REPO" >> $GITHUB_OUTPUT
+          echo "frontend_url=$FRONTEND_REPO" >> $GITHUB_OUTPUT
+
+      - name: Generate image tags
+        id: tags
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=$SHORT_SHA" >> $GITHUB_OUTPUT
+
+      - name: Build and push backend image
+        if: hashFiles('backend/**') != ''
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.backend_url }}
+          IMAGE_TAG: ${{ steps.tags.outputs.short_sha }}
+        run: |
+          docker build --platform linux/amd64 -t $ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REPOSITORY:latest ./backend
+          docker push $ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REPOSITORY:latest
+
+      - name: Build and push frontend image
+        if: hashFiles('frontend/**') != ''
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.frontend_url }}
+          IMAGE_TAG: ${{ steps.tags.outputs.short_sha }}
+        run: |
+          docker build --platform linux/amd64 -t $ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REPOSITORY:latest ./frontend
+          docker push $ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REPOSITORY:latest
+
+      - name: Update kustomization with new image tags
+        env:
+          BACKEND_URL: ${{ steps.ecr.outputs.backend_url }}
+          FRONTEND_URL: ${{ steps.ecr.outputs.frontend_url }}
+          IMAGE_TAG: ${{ steps.tags.outputs.short_sha }}
+        run: |
+          cd ramya-opsera/k8s/overlays/dev
+          # Update backend image
+          sed -i "s|PLACEHOLDER_ECR_BACKEND_URL|${BACKEND_URL}|g" kustomization.yaml
+          sed -i "s|:latest|:${IMAGE_TAG}|g" kustomization.yaml
+          # Update frontend image
+          sed -i "s|PLACEHOLDER_ECR_FRONTEND_URL|${FRONTEND_URL}|g" kustomization.yaml
+          sed -i "s|:latest|:${IMAGE_TAG}|g" kustomization.yaml
+
+      - name: Commit updated manifests
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add ramya-opsera/k8s/overlays/dev/kustomization.yaml
+          git diff --staged --quiet || git commit -m "[skip ci] Update image tags to ${{ steps.tags.outputs.short_sha }}
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+          git push
+
+  update-argocd:
+    name: Update ArgoCD Application
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --name ${TENANT}-argocd --region ${AWS_REGION} || true
+
+      - name: Apply ArgoCD Application
+        run: |
+          kubectl apply -f ramya-opsera/argocd/application.yaml --server-side --force-conflicts || true
+
+      - name: Sync ArgoCD Application
+        run: |
+          kubectl annotate application ramya-argo-dev -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ramya-backend
+  labels:
+    app: ramya-backend
+    tenant: adlcteam
+    app-identifier: ramya
+    environment: dev
+    deployment-name: ramya-opsera
+    managed-by: opsera-gitops
+    created-by: claude-code
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ramya-backend
+  template:
+    metadata:
+      labels:
+        app: ramya-backend
+        tenant: adlcteam
+        app-identifier: ramya
+        environment: dev
+    spec:
+      containers:
+      - name: backend
+        image: PLACEHOLDER_ECR_BACKEND_URL:latest
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: ENVIRONMENT
+          value: "dev"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+

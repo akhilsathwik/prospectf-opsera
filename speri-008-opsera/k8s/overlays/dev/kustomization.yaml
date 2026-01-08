@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: speri-008-dev
+
+resources:
+  - ../../base
+
+images:
+  - name: speri-008-backend
+    newName: 792373136340.dkr.ecr.ap-northeast-1.amazonaws.com/speri-008-backend
+    newTag: latest
+  - name: speri-008-frontend
+    newName: 792373136340.dkr.ecr.ap-northeast-1.amazonaws.com/speri-008-frontend
+    newTag: latest
+
+commonLabels:
+  environment: dev
+
+replicas:
+  - name: speri-008-backend
+    count: 1
+  - name: speri-008-frontend
+    count: 1

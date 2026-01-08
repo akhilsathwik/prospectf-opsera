@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: speri-008-frontend
+  labels:
+    app: speri-008-frontend
+    tenant: speri
+    app-identifier: speri-008
+    environment: dev
+    managed-by: opsera-gitops
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: speri-008-dev.agents.opsera-labs.com
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:ap-northeast-1:792373136340:certificate/PLACEHOLDER"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+spec:
+  type: LoadBalancer
+  selector:
+    app: speri-008-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: 8080
+      protocol: TCP

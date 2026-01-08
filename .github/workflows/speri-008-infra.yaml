@@ -1,0 +1,252 @@
+name: "speri-008 Infrastructure"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+env:
+  AWS_REGION: ap-northeast-1
+  APP_IDENTIFIER: speri-008
+  TENANT: speri
+  ENVIRONMENT: dev
+  TF_WORKING_DIR: speri-008-opsera/terraform
+  TF_VAR_aws_region: ap-northeast-1
+
+jobs:
+  terraform:
+    name: "Terraform Infrastructure"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS credentials
+        run: |
+          echo "=== AWS Identity ==="
+          aws sts get-caller-identity
+          echo ""
+          echo "=== AWS Region ==="
+          echo "Region: ${{ env.AWS_REGION }}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Import existing ECR repos (idempotent)
+        if: ${{ github.event.inputs.action == 'apply' }}
+        continue-on-error: true
+        run: |
+          # Import backend ECR if exists
+          if aws ecr describe-repositories --repository-names ${{ env.APP_IDENTIFIER }}-backend --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "Importing existing backend ECR repository..."
+            terraform import aws_ecr_repository.backend ${{ env.APP_IDENTIFIER }}-backend || true
+          fi
+
+          # Import frontend ECR if exists
+          if aws ecr describe-repositories --repository-names ${{ env.APP_IDENTIFIER }}-frontend --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "Importing existing frontend ECR repository..."
+            terraform import aws_ecr_repository.frontend ${{ env.APP_IDENTIFIER }}-frontend || true
+          fi
+
+      - name: Terraform Plan
+        if: ${{ github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply' }}
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: ${{ github.event.inputs.action == 'destroy' }}
+        run: terraform destroy -auto-approve
+
+      - name: Output infrastructure details
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          echo "=== Infrastructure Outputs ==="
+          terraform output
+
+          echo ""
+          echo "=== Next Steps ==="
+          echo "1. Configure kubectl for ArgoCD cluster:"
+          echo "   aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-argocd --region ${{ env.AWS_REGION }}"
+          echo ""
+          echo "2. Install ArgoCD (run install-argocd job)"
+          echo ""
+          echo "3. Configure kubectl for Workload cluster:"
+          echo "   aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}"
+
+  install-argocd:
+    name: "Install ArgoCD"
+    runs-on: ubuntu-latest
+    needs: terraform
+    if: ${{ github.event.inputs.action == 'apply' }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Wait for ArgoCD cluster to be active
+        run: |
+          echo "Waiting for ArgoCD cluster to be ACTIVE..."
+          aws eks wait cluster-active --name ${{ env.APP_IDENTIFIER }}-argocd --region ${{ env.AWS_REGION }}
+          echo "ArgoCD cluster is ACTIVE"
+
+      - name: Configure kubectl for ArgoCD cluster
+        run: |
+          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-argocd --region ${{ env.AWS_REGION }}
+
+      - name: Install ArgoCD
+        run: |
+          echo "Creating argocd namespace..."
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Installing ArgoCD..."
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+          echo "Waiting for ArgoCD to be ready..."
+          kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
+
+          echo ""
+          echo "=== ArgoCD Installation Complete ==="
+          echo "Get the admin password with:"
+          echo "kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+
+  install-externaldns:
+    name: "Install ExternalDNS"
+    runs-on: ubuntu-latest
+    needs: terraform
+    if: ${{ github.event.inputs.action == 'apply' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Wait for Workload cluster to be active
+        run: |
+          echo "Waiting for Workload cluster to be ACTIVE..."
+          aws eks wait cluster-active --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
+          echo "Workload cluster is ACTIVE"
+
+      - name: Configure kubectl for Workload cluster
+        run: |
+          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
+
+      - name: Get ExternalDNS role ARN
+        id: get-role
+        run: |
+          ROLE_ARN=$(aws iam get-role --role-name ${{ env.APP_IDENTIFIER }}-external-dns --query 'Role.Arn' --output text 2>/dev/null || echo "")
+          if [ -z "$ROLE_ARN" ]; then
+            echo "ERROR: ExternalDNS IAM role not found. Run Terraform apply first."
+            exit 1
+          fi
+          echo "role_arn=$ROLE_ARN" >> $GITHUB_OUTPUT
+          echo "ExternalDNS Role ARN: $ROLE_ARN"
+
+      - name: Install ExternalDNS
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: external-dns
+            namespace: kube-system
+            annotations:
+              eks.amazonaws.com/role-arn: ${{ steps.get-role.outputs.role_arn }}
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: external-dns
+          rules:
+          - apiGroups: [""]
+            resources: ["services","endpoints","pods","nodes"]
+            verbs: ["get","watch","list"]
+          - apiGroups: ["extensions","networking.k8s.io"]
+            resources: ["ingresses"]
+            verbs: ["get","watch","list"]
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: external-dns
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: external-dns
+          subjects:
+          - kind: ServiceAccount
+            name: external-dns
+            namespace: kube-system
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: external-dns
+            namespace: kube-system
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: external-dns
+            template:
+              metadata:
+                labels:
+                  app: external-dns
+              spec:
+                serviceAccountName: external-dns
+                containers:
+                - name: external-dns
+                  image: registry.k8s.io/external-dns/external-dns:v0.14.0
+                  args:
+                  - --source=service
+                  - --source=ingress
+                  - --domain-filter=opsera-labs.com
+                  - --provider=aws
+                  - --aws-zone-type=public
+                  - --registry=txt
+                  - --txt-owner-id=${{ env.APP_IDENTIFIER }}-external-dns
+          EOF
+
+          echo ""
+          echo "=== ExternalDNS Installation Complete ==="
+          kubectl get pods -n kube-system -l app=external-dns

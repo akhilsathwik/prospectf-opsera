@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ramya-dev
+  labels:
+    tenant: adlcteam
+    app-identifier: ramya
+    environment: dev
+    deployment-name: ramya-opsera
+    managed-by: opsera-gitops
+    created-by: claude-code
+

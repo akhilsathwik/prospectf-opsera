@@ -1,0 +1,60 @@
+name: Infrastructure - ramya
+
+on:
+  push:
+    branches:
+      - ramya-opsera
+    paths:
+      - 'ramya-opsera/terraform/**'
+  workflow_dispatch:
+
+env:
+  TENANT: adlcteam
+  APP_IDENTIFIER: ramya
+  ENVIRONMENT: dev
+  AWS_REGION: us-east-1
+  DEPLOYMENT_NAME: ramya-opsera
+
+jobs:
+  terraform:
+    name: Terraform Infrastructure
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: Terraform Init
+        working-directory: ramya-opsera/terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ramya-opsera/terraform
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: github.event_name == 'push'
+        working-directory: ramya-opsera/terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Output ECR URLs
+        working-directory: ramya-opsera/terraform
+        run: |
+          echo "ECR_BACKEND_URL=$(terraform output -raw ecr_backend_url)" >> $GITHUB_ENV
+          echo "ECR_FRONTEND_URL=$(terraform output -raw ecr_frontend_url)" >> $GITHUB_ENV
+

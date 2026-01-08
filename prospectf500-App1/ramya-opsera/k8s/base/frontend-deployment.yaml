@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ramya-frontend
+  labels:
+    app: ramya-frontend
+    tenant: adlcteam
+    app-identifier: ramya
+    environment: dev
+    deployment-name: ramya-opsera
+    managed-by: opsera-gitops
+    created-by: claude-code
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ramya-frontend
+  template:
+    metadata:
+      labels:
+        app: ramya-frontend
+        tenant: adlcteam
+        app-identifier: ramya
+        environment: dev
+    spec:
+      containers:
+      - name: frontend
+        image: PLACEHOLDER_ECR_FRONTEND_URL:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: cache
+          mountPath: /var/cache/nginx
+        - name: run
+          mountPath: /var/run
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: cache
+        emptyDir: {}
+      - name: run
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+

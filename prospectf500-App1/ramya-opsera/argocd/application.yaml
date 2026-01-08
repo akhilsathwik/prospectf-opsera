@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ramya-argo-dev
+  namespace: argocd
+  labels:
+    tenant: adlcteam
+    app-identifier: ramya
+    environment: dev
+    deployment-name: ramya-opsera
+    managed-by: opsera-gitops
+    created-by: claude-code
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/opsera-salesengg/prospectf500-App1.git
+    targetRevision: ramya-opsera
+    path: ramya-opsera/k8s/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ramya-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+  revisionHistoryLimit: 10
+

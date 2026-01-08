@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: speri-008-argo-dev
+  namespace: argocd
+  labels:
+    tenant: speri
+    app-identifier: speri-008
+    environment: dev
+    deployment-name: speri-008-opsera
+    managed-by: opsera-gitops
+    created-by: claude-code
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/opsera-salesengg/prospectf500-App1.git
+    targetRevision: speri-008-opsera
+    path: speri-008-opsera/k8s/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: speri-008-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PruneLast=true

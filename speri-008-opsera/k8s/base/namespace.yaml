@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: speri-008-dev
+  labels:
+    tenant: speri
+    app-identifier: speri-008
+    environment: dev
+    deployment-name: speri-008-opsera
+    managed-by: opsera-gitops
+    created-by: claude-code

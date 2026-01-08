@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ramya-backend
+  labels:
+    app: ramya-backend
+    tenant: adlcteam
+    app-identifier: ramya
+    environment: dev
+    deployment-name: ramya-opsera
+    managed-by: opsera-gitops
+    created-by: claude-code
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: ramya-backend
+

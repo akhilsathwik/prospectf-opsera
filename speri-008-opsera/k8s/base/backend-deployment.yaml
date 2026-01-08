@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: speri-008-backend
+  labels:
+    app: speri-008-backend
+    tenant: speri
+    app-identifier: speri-008
+    environment: dev
+    managed-by: opsera-gitops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: speri-008-backend
+  template:
+    metadata:
+      labels:
+        app: speri-008-backend
+        tenant: speri
+        app-identifier: speri-008
+    spec:
+      containers:
+        - name: backend
+          image: speri-008-backend:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ENVIRONMENT
+              value: "dev"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            readOnlyRootFilesystem: false
+            runAsNonRoot: false
