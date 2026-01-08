@@ -4,7 +4,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Send, Zap, MessageCircle, Loader2, AlertCircle, CheckCircle2, Settings, Key, Eye, EyeOff, X } from 'lucide-react'
 import { cn } from './lib/utils'
 
-const API_URL = 'http://localhost:8000'
+// Use relative URLs in production - nginx will proxy to backend service
+// In Kubernetes, nginx proxies /api, /test, /chat, /admin to backend
+// For local development, use http://localhost:8000
+// Check if we're in production build (Vite sets NODE_ENV during build)
+const API_URL = typeof window !== 'undefined' && window.location.hostname !== 'localhost' ? '' : 'http://localhost:8000'
 
 function App() {
   const [message, setMessage] = useState('')
