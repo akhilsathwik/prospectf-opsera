@@ -125,12 +125,12 @@ jobs:
           echo ""
           echo "=== Next Steps ==="
           echo "1. Configure kubectl for ArgoCD cluster:"
-          echo "   aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-argocd --region ${{ env.AWS_REGION }}"
+          echo "   aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-cd --region ${{ env.AWS_REGION }}"
           echo ""
           echo "2. Install ArgoCD (run install-argocd job)"
           echo ""
           echo "3. Configure kubectl for Workload cluster:"
-          echo "   aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}"
+          echo "   aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}"
 
   install-argocd:
     name: "Install ArgoCD"
@@ -149,12 +149,14 @@ jobs:
       - name: Wait for ArgoCD cluster to be active
         run: |
           echo "Waiting for ArgoCD cluster to be ACTIVE..."
-          aws eks wait cluster-active --name ${{ env.APP_IDENTIFIER }}-argocd --region ${{ env.AWS_REGION }}
+          # Use shortened cluster name: prospectf500-app1-cd
+          aws eks wait cluster-active --name ${{ env.APP_IDENTIFIER }}-cd --region ${{ env.AWS_REGION }}
           echo "ArgoCD cluster is ACTIVE"
 
       - name: Configure kubectl for ArgoCD cluster
         run: |
-          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-argocd --region ${{ env.AWS_REGION }}
+          # Use shortened cluster name: prospectf500-app1-cd
+          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-cd --region ${{ env.AWS_REGION }}
 
       - name: Install ArgoCD
         run: |
@@ -189,12 +191,14 @@ jobs:
       - name: Wait for Workload cluster to be active
         run: |
           echo "Waiting for Workload cluster to be ACTIVE..."
-          aws eks wait cluster-active --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
+          # Use shortened cluster name: prospectf500-app1-wrk-dev
+          aws eks wait cluster-active --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
           echo "Workload cluster is ACTIVE"
 
       - name: Configure kubectl for Workload cluster
         run: |
-          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-workload-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
+          # Use shortened cluster name: prospectf500-app1-wrk-dev
+          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
 
       - name: Get ExternalDNS role ARN
         id: get-role
