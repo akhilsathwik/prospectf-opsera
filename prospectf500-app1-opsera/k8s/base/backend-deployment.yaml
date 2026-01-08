@@ -24,6 +24,7 @@ spec:
       containers:
         - name: backend
           image: prospectf500-app1-backend:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           env:
