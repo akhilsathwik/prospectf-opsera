@@ -7,11 +7,11 @@ resources:
   - ../../base
 
 # Image tags will be updated by GitHub Actions workflow
-# Placeholders will be replaced: ACCOUNT_ID -> actual AWS account ID
+# Placeholders will be replaced: 792373136340 -> actual AWS account ID
 images:
   - name: prospectf500-app1-backend
-    newName: ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
-    newTag: latest
+    newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
+    newTag: 0ce764b
   - name: prospectf500-app1-frontend
-    newName: ACCOUNT_ID.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-frontend
-    newTag: latest
+    newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-frontend
+    newTag: 0ce764b
