@@ -10,8 +10,8 @@ resources:
 # Placeholders will be replaced: 792373136340.dkr.ecr.eu-north-1.amazonaws.com -> actual ECR registry URL
 images:
   - name: prospectf500-app1-backend
-    newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
-    newTag: 75260e5
+    newName: ECR_REGISTRY/prospectf500-app1-backend
+    newTag: "latest"
   - name: prospectf500-app1-frontend
-    newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-frontend
-    newTag: 75260e5
+    newName: ECR_REGISTRY/prospectf500-app1-frontend
+    newTag: "latest"
