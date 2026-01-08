@@ -344,9 +344,35 @@ jobs:
           fi
           
           echo ""
+          echo "=== Verifying kustomization.yaml one final time ==="
+          cd prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+          echo "Current directory: $(pwd)"
+          echo "kustomization.yaml contents:"
+          cat kustomization.yaml
+          echo ""
+          
+          # Check if placeholders still exist
+          if grep -q "ECR_REGISTRY\|ACCOUNT_ID" kustomization.yaml; then
+            echo "❌ CRITICAL ERROR: Placeholders still exist in kustomization.yaml!"
+            echo "This should not happen. The replacement step failed."
+            grep -n "ECR_REGISTRY\|ACCOUNT_ID" kustomization.yaml
+            exit 1
+          fi
+          
+          # Preview what Kustomize will generate
+          echo "=== Preview: What Kustomize will generate ==="
+          if command -v kustomize &> /dev/null; then
+            kustomize build . > /tmp/kustomize-output.yaml 2>&1 || true
+            echo "Backend image from Kustomize output:"
+            grep -A 2 "name: backend" /tmp/kustomize-output.yaml | grep "image:" || true
+            echo "Frontend image from Kustomize output:"
+            grep -A 2 "name: frontend" /tmp/kustomize-output.yaml | grep "image:" || true
+          fi
+          echo ""
+          
           echo "=== Applying with Kustomize ==="
           # Apply deployment
-          kubectl apply -k prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+          kubectl apply -k .
           
           echo ""
           echo "=== Deployment Applied ==="
