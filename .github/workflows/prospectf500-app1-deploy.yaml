@@ -225,47 +225,109 @@ jobs:
 
       - name: Check pod status and events
         if: steps.check-cluster.outputs.cluster_exists == 'true'
+        continue-on-error: true
         run: |
           echo "=== Checking pod status ==="
           kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o wide
           
           echo ""
-          echo "=== Recent events ==="
-          kubectl get events -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --sort-by='.lastTimestamp' | tail -20
+          echo "=== Deployment status ==="
+          kubectl get deployments -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
           
           echo ""
-          echo "=== Backend pod logs (if exists) ==="
+          echo "=== Recent events (sorted by time) ==="
+          kubectl get events -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --sort-by='.lastTimestamp' | tail -30
+          
+          echo ""
+          echo "=== Checking for failed pods ==="
+          FAILED_PODS=$(kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --field-selector=status.phase!=Running,status.phase!=Succeeded -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+          
+          if [ -n "$FAILED_PODS" ]; then
+            echo "Found failed/pending pods: $FAILED_PODS"
+            for POD in $FAILED_PODS; do
+              echo ""
+              echo "=== Pod: $POD ==="
+              kubectl describe pod $POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} | grep -A 20 "Events:" || true
+              kubectl describe pod $POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} | grep -A 10 "State:" || true
+              
+              # Check for image pull errors
+              IMAGE_ERROR=$(kubectl describe pod $POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} | grep -i "image\|pull\|errImagePull\|ImagePullBackOff" || echo "")
+              if [ -n "$IMAGE_ERROR" ]; then
+                echo "⚠ IMAGE PULL ERROR DETECTED:"
+                echo "$IMAGE_ERROR"
+              fi
+            done
+          fi
+          
+          echo ""
+          echo "=== Backend pod details ==="
           BACKEND_POD=$(kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -l app=${{ env.APP_IDENTIFIER }}-backend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
           if [ -n "$BACKEND_POD" ]; then
             echo "Backend pod: $BACKEND_POD"
-            kubectl logs $BACKEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --tail=50 || echo "Could not get logs"
-            kubectl describe pod $BACKEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} | tail -30
+            echo "Pod status:"
+            kubectl get pod $BACKEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status}' | jq '.' || kubectl get pod $BACKEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+            echo ""
+            echo "Pod describe (full):"
+            kubectl describe pod $BACKEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+            echo ""
+            echo "Pod logs (if container started):"
+            kubectl logs $BACKEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --tail=50 2>&1 || echo "Could not get logs (container may not have started)"
+          else
+            echo "No backend pod found"
           fi
           
           echo ""
-          echo "=== Frontend pod logs (if exists) ==="
+          echo "=== Frontend pod details ==="
           FRONTEND_POD=$(kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -l app=${{ env.APP_IDENTIFIER }}-frontend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
           if [ -n "$FRONTEND_POD" ]; then
             echo "Frontend pod: $FRONTEND_POD"
-            kubectl logs $FRONTEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --tail=50 || echo "Could not get logs"
-            kubectl describe pod $FRONTEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} | tail -30
+            echo "Pod status:"
+            kubectl get pod $FRONTEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status}' | jq '.' || kubectl get pod $FRONTEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+            echo ""
+            echo "Pod describe (full):"
+            kubectl describe pod $FRONTEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+            echo ""
+            echo "Pod logs (if container started):"
+            kubectl logs $FRONTEND_POD -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --tail=50 2>&1 || echo "Could not get logs (container may not have started)"
+          else
+            echo "No frontend pod found"
           fi
+          
+          echo ""
+          echo "=== Checking actual deployed image names ==="
+          kubectl get deployment ${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.spec.template.spec.containers[0].image}' && echo "" || true
+          kubectl get deployment ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.spec.template.spec.containers[0].image}' && echo "" || true
 
       - name: Wait for deployments
         if: steps.check-cluster.outputs.cluster_exists == 'true'
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           echo "=== Waiting for backend deployment ==="
           kubectl rollout status deployment/${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --timeout=300s || {
-            echo "Backend deployment timeout - checking status..."
-            kubectl get deployment ${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o yaml
+            echo ""
+            echo "⚠ Backend deployment timeout - this is expected if pods are failing"
+            echo "Check the 'Check pod status and events' step above for details"
+            echo ""
+            echo "Deployment status:"
+            kubectl get deployment ${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+            echo ""
+            echo "ReplicaSet status:"
+            kubectl get rs -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -l app=${{ env.APP_IDENTIFIER }}-backend
             exit 1
           }
           
           echo "=== Waiting for frontend deployment ==="
           kubectl rollout status deployment/${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --timeout=300s || {
-            echo "Frontend deployment timeout - checking status..."
-            kubectl get deployment ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o yaml
+            echo ""
+            echo "⚠ Frontend deployment timeout - this is expected if pods are failing"
+            echo "Check the 'Check pod status and events' step above for details"
+            echo ""
+            echo "Deployment status:"
+            kubectl get deployment ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+            echo ""
+            echo "ReplicaSet status:"
+            kubectl get rs -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -l app=${{ env.APP_IDENTIFIER }}-frontend
             exit 1
           }
 
