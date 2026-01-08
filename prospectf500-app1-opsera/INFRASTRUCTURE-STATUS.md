@@ -18,8 +18,8 @@
 
 **Expected Resources:**
 - [ ] VPC: `prospectf500-app1-vpc`
-- [ ] ArgoCD Cluster: `prospectf500-app1-argocd`
-- [ ] Workload Cluster: `prospectf500-app1-workload-dev`
+- [ ] ArgoCD Cluster: `prospectf500-app1-cd` (shortened name)
+- [ ] Workload Cluster: `prospectf500-app1-wrk-dev` (shortened name)
 - [ ] ECR Backend: `prospectf500-app1-backend`
 - [ ] ECR Frontend: `prospectf500-app1-frontend`
 - [ ] IAM Role: `prospectf500-app1-external-dns`
@@ -100,14 +100,22 @@ aws eks list-clusters --region eu-north-1 --query 'clusters[?contains(@, `prospe
 ```
 
 **Expected:**
-- `prospectf500-app1-argocd`
-- `prospectf500-app1-workload-dev`
+- `prospectf500-app1-cd` (ArgoCD cluster)
+- `prospectf500-app1-wrk-dev` (Workload cluster)
 
 ### 2. Check Cluster Status
 ```bash
-aws eks describe-cluster --name prospectf500-app1-argocd --region eu-north-1 --query 'cluster.status'
-aws eks describe-cluster --name prospectf500-app1-workload-dev --region eu-north-1 --query 'cluster.status'
+aws eks describe-cluster --name prospectf500-app1-cd --region eu-north-1 --query 'cluster.status'
+aws eks describe-cluster --name prospectf500-app1-wrk-dev --region eu-north-1 --query 'cluster.status'
 ```
+
+### 2b. Check Cluster Endpoint Access (CRITICAL)
+```bash
+# Verify public endpoint is enabled
+aws eks describe-cluster --name prospectf500-app1-cd --region eu-north-1 --query 'cluster.resourcesVpcConfig.endpointPublicAccess'
+aws eks describe-cluster --name prospectf500-app1-wrk-dev --region eu-north-1 --query 'cluster.resourcesVpcConfig.endpointPublicAccess'
+```
+**Expected:** `True` (both clusters must have public endpoint enabled)
 
 **Expected:** `ACTIVE`
 
@@ -129,14 +137,16 @@ aws iam get-role --role-name prospectf500-app1-external-dns --query 'Role.RoleNa
 
 ### 5. Check ArgoCD (if kubectl configured)
 ```bash
-aws eks update-kubeconfig --name prospectf500-app1-argocd --region eu-north-1
+aws eks update-kubeconfig --name prospectf500-app1-cd --region eu-north-1
 kubectl get pods -n argocd
+kubectl get deployment argocd-server -n argocd
 ```
 
 ### 6. Check ExternalDNS (if kubectl configured)
 ```bash
-aws eks update-kubeconfig --name prospectf500-app1-workload-dev --region eu-north-1
+aws eks update-kubeconfig --name prospectf500-app1-wrk-dev --region eu-north-1
 kubectl get pods -n kube-system -l app=external-dns
+kubectl get serviceaccount external-dns -n kube-system -o yaml | grep eks.amazonaws.com/role-arn
 ```
 
 ---
