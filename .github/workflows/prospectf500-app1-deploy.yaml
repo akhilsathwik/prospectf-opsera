@@ -232,6 +232,62 @@ jobs:
           
           echo "✓ Both images exist in ECR"
 
+      - name: Update kustomization.yaml (ensure latest)
+        if: steps.check-cluster.outputs.cluster_exists == 'true'
+        run: |
+          cd prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+          
+          # Get values
+          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
+          ECR_REGISTRY="${{ needs.build-and-push.outputs.ecr_registry }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          APP_IDENTIFIER="${{ env.APP_IDENTIFIER }}"
+          
+          echo "=== Updating kustomization.yaml ==="
+          echo "AWS_ACCOUNT_ID: $AWS_ACCOUNT_ID"
+          echo "ECR_REGISTRY: $ECR_REGISTRY"
+          echo "IMAGE_TAG: $IMAGE_TAG"
+          echo ""
+          
+          # Show current state
+          echo "=== Current kustomization.yaml ==="
+          cat kustomization.yaml
+          echo ""
+          
+          # Replace ALL placeholders
+          echo "=== Replacing placeholders ==="
+          sed -i "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" kustomization.yaml
+          sed -i "s|ECR_REGISTRY|${ECR_REGISTRY}|g" kustomization.yaml
+          sed -i "s|[0-9]\{12\}\.dkr\.ecr\.|${AWS_ACCOUNT_ID}.dkr.ecr.|g" kustomization.yaml
+          
+          # Force update image names
+          sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
+          sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
+          sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
+          
+          echo "=== Updated kustomization.yaml ==="
+          cat kustomization.yaml
+          echo ""
+          
+          # Verify no placeholders remain
+          if grep -q "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
+            echo "❌ ERROR: Placeholders still found in kustomization.yaml!"
+            grep -n "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml
+            exit 1
+          fi
+          
+          echo "✓ kustomization.yaml updated successfully"
+
+      - name: Preview Kustomize output (debug)
+        if: steps.check-cluster.outputs.cluster_exists == 'true'
+        continue-on-error: true
+        run: |
+          cd prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+          
+          echo "=== Preview: What Kustomize will generate ==="
+          kubectl kustomize . | grep -A 5 "image:" || echo "Could not preview (kubectl kustomize might not be available)"
+          echo ""
+
       - name: Deploy with Kustomize
         if: steps.check-cluster.outputs.cluster_exists == 'true'
         run: |
@@ -247,6 +303,23 @@ jobs:
           echo "  Frontend: ${ECR_REGISTRY}/${{ env.APP_IDENTIFIER }}-frontend:${IMAGE_TAG}"
           echo ""
           
+          # Delete existing deployments if they have wrong image (force recreation)
+          echo "=== Checking existing deployments ==="
+          BACKEND_IMAGE=$(kubectl get deployment ${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+          FRONTEND_IMAGE=$(kubectl get deployment ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+          
+          if echo "$BACKEND_IMAGE" | grep -q "ACCOUNT_ID\|ECR_REGISTRY"; then
+            echo "⚠ Backend deployment has placeholder, deleting to force recreation..."
+            kubectl delete deployment ${{ env.APP_IDENTIFIER }}-backend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --ignore-not-found=true
+          fi
+          
+          if echo "$FRONTEND_IMAGE" | grep -q "ACCOUNT_ID\|ECR_REGISTRY"; then
+            echo "⚠ Frontend deployment has placeholder, deleting to force recreation..."
+            kubectl delete deployment ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --ignore-not-found=true
+          fi
+          
+          echo ""
+          echo "=== Applying with Kustomize ==="
           # Apply deployment
           kubectl apply -k prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
           
