@@ -113,6 +113,10 @@ module "argocd_cluster" {
   # Fix #40: Enable cluster creator admin permissions
   enable_cluster_creator_admin_permissions = true
 
+  # Cluster endpoint access - enable public for GitHub Actions
+  cluster_endpoint_public_access  = true
+  cluster_endpoint_private_access = true
+
   # Enable IRSA for ExternalDNS
   enable_irsa = true
 
@@ -151,6 +155,10 @@ module "workload_cluster" {
 
   # Fix #40: Enable cluster creator admin permissions
   enable_cluster_creator_admin_permissions = true
+
+  # Cluster endpoint access - enable public for GitHub Actions
+  cluster_endpoint_public_access  = true
+  cluster_endpoint_private_access = true
 
   # Enable IRSA for ExternalDNS, AWS LB Controller
   enable_irsa = true

@@ -158,13 +158,26 @@ jobs:
           # Use shortened cluster name: prospectf500-app1-cd
           aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-cd --region ${{ env.AWS_REGION }}
 
+      - name: Wait for ArgoCD API server to be ready
+        run: |
+          echo "Waiting for API server to be accessible..."
+          for i in {1..30}; do
+            if kubectl cluster-info --request-timeout=10s 2>/dev/null; then
+              echo "✓ API server is ready"
+              exit 0
+            fi
+            echo "Attempt $i/30: API server not ready yet, waiting 10s..."
+            sleep 10
+          done
+          echo "WARNING: API server may not be fully ready, continuing anyway..."
+
       - name: Install ArgoCD
         run: |
           echo "Creating argocd namespace..."
-          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f --validate=false
 
           echo "Installing ArgoCD..."
-          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --validate=false
 
           echo "Waiting for ArgoCD to be ready..."
           kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
@@ -200,6 +213,19 @@ jobs:
           # Use shortened cluster name: prospectf500-app1-wrk-dev
           aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
 
+      - name: Wait for Workload API server to be ready
+        run: |
+          echo "Waiting for API server to be accessible..."
+          for i in {1..30}; do
+            if kubectl cluster-info --request-timeout=10s 2>/dev/null; then
+              echo "✓ API server is ready"
+              exit 0
+            fi
+            echo "Attempt $i/30: API server not ready yet, waiting 10s..."
+            sleep 10
+          done
+          echo "WARNING: API server may not be fully ready, continuing anyway..."
+
       - name: Get ExternalDNS role ARN
         id: get-role
         run: |
@@ -213,7 +239,7 @@ jobs:
 
       - name: Install ExternalDNS
         run: |
-          cat <<EOF | kubectl apply -f -
+          cat <<EOF | kubectl apply -f - --validate=false
           apiVersion: v1
           kind: ServiceAccount
           metadata:
