@@ -100,8 +100,12 @@ module "argocd_cluster" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
 
-  cluster_name    = "${var.app_identifier}-argocd"
+  # Keep cluster name short to avoid IAM role name_prefix > 38 chars
+  # Example: prospectf500-app1-cd
+  cluster_name    = "${var.app_identifier}-cd"
   cluster_version = var.cluster_version
+  # Avoid long IAM role name_prefix (Fix: keep under 38 chars)
+  iam_role_use_name_prefix = false
 
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
@@ -135,8 +139,12 @@ module "workload_cluster" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
 
-  cluster_name    = "${var.app_identifier}-workload-${var.environment}"
+  # Keep cluster name short to satisfy IAM role name_prefix <= 38 chars
+  # Example: prospectf500-app1-wrk-dev
+  cluster_name    = "${var.app_identifier}-wrk-${var.environment}"
   cluster_version = var.cluster_version
+  # Avoid long IAM role name_prefix (Fix: keep under 38 chars)
+  iam_role_use_name_prefix = false
 
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
@@ -158,7 +166,7 @@ module "workload_cluster" {
   }
 
   tags = {
-    Name        = "${var.app_identifier}-workload-${var.environment}"
+    Name        = "${var.app_identifier}-wrk-${var.environment}"
     role        = "workload"
     environment = var.environment
   }
