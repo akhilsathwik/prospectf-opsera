@@ -254,16 +254,28 @@ jobs:
           cat kustomization.yaml
           echo ""
           
-          # Replace ALL placeholders
+          # Replace ALL placeholders - be very aggressive
           echo "=== Replacing placeholders ==="
-          sed -i "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" kustomization.yaml
+          
+          # First, replace ECR_REGISTRY (most common case)
           sed -i "s|ECR_REGISTRY|${ECR_REGISTRY}|g" kustomization.yaml
+          
+          # Replace ACCOUNT_ID in any form (standalone or in URLs)
+          sed -i "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" kustomization.yaml
+          
+          # Replace any hardcoded account IDs (12-digit numbers)
           sed -i "s|[0-9]\{12\}\.dkr\.ecr\.|${AWS_ACCOUNT_ID}.dkr.ecr.|g" kustomization.yaml
           
-          # Force update image names
-          sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
-          sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
-          sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
+          # Force update image names - match any format
+          # This handles: newName: ECR_REGISTRY/..., newName: ACCOUNT_ID.dkr.ecr..., newName: 792373136340.dkr.ecr...
+          sed -i "s|newName:.*${APP_IDENTIFIER}-backend.*|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
+          sed -i "s|newName:.*${APP_IDENTIFIER}-frontend.*|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
+          
+          # Update tags - match any tag value
+          sed -i "s|newTag:.*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
+          
+          # Double-check: replace any remaining ACCOUNT_ID that might have been introduced
+          sed -i "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" kustomization.yaml
           
           echo "=== Updated kustomization.yaml ==="
           cat kustomization.yaml
@@ -285,7 +297,20 @@ jobs:
           cd prospectf500-app1-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
           
           echo "=== Preview: What Kustomize will generate ==="
-          kubectl kustomize . | grep -A 5 "image:" || echo "Could not preview (kubectl kustomize might not be available)"
+          echo "Checking kustomization.yaml one more time:"
+          cat kustomization.yaml
+          echo ""
+          
+          # Use kustomize build to see what will be generated
+          if command -v kustomize &> /dev/null; then
+            echo "Using kustomize command:"
+            kustomize build . | grep -A 3 "image:" || true
+          elif kubectl version --client &> /dev/null; then
+            echo "Using kubectl kustomize:"
+            kubectl kustomize . | grep -A 3 "image:" || true
+          else
+            echo "Neither kustomize nor kubectl available for preview"
+          fi
           echo ""
 
       - name: Deploy with Kustomize
