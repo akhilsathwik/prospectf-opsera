@@ -112,12 +112,16 @@ jobs:
           AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
           ECR_REGISTRY="${{ needs.build-and-push.outputs.ecr_registry }}"
           IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          APP_IDENTIFIER="${{ env.APP_IDENTIFIER }}"
 
-          # Update backend image (Fix #82: Update ALL images)
-          sed -i "s|newName: .*/${APP_IDENTIFIER}-backend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
+          # Replace ALL instances of ACCOUNT_ID placeholder (Fix #81)
+          sed -i "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" kustomization.yaml
 
-          # Update frontend image (Fix #82: Update ALL images)
-          sed -i "s|newName: .*/${APP_IDENTIFIER}-frontend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
+          # Update backend image newName (Fix #82: Update ALL images)
+          sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-backend|" kustomization.yaml
+
+          # Update frontend image newName (Fix #82: Update ALL images)
+          sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_REGISTRY}/${APP_IDENTIFIER}-frontend|" kustomization.yaml
 
           # Update ALL tags
           sed -i "s|newTag: .*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
@@ -125,6 +129,7 @@ jobs:
           # Validate no placeholders remain (Fix #81)
           if grep -q "ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
             echo "ERROR: Placeholders found in kustomization.yaml"
+            cat kustomization.yaml
             exit 1
           fi
 
