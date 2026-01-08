@@ -181,6 +181,13 @@ module "workload_cluster" {
 }
 
 # ============================================================================
+# Note: ECR Permissions
+# ============================================================================
+# The terraform-aws-modules/eks module automatically attaches 
+# AmazonEC2ContainerRegistryReadOnly policy to node group IAM roles.
+# No additional configuration needed.
+
+# ============================================================================
 # ExternalDNS IAM Role (for workload cluster)
 # ============================================================================
 resource "aws_iam_role" "external_dns" {

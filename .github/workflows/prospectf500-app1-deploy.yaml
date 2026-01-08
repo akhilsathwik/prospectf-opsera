@@ -396,8 +396,57 @@ jobs:
           LB_HOSTNAME=$(kubectl get svc ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "PENDING")
           if [ "$LB_HOSTNAME" != "PENDING" ] && [ -n "$LB_HOSTNAME" ]; then
             echo "✓ LoadBalancer created: $LB_HOSTNAME"
+            
+            # Extract LoadBalancer ARN/name to find target groups
+            echo ""
+            echo "=== Checking LoadBalancer Target Group Health ==="
+            LB_NAME=$(echo $LB_HOSTNAME | cut -d'.' -f1)
+            echo "LoadBalancer name: $LB_NAME"
+            
+            # Find target groups associated with this LoadBalancer
+            TARGET_GROUPS=$(aws elbv2 describe-load-balancers --region ${{ env.AWS_REGION }} --query "LoadBalancers[?contains(DNSName, '$LB_NAME')].LoadBalancerArn" --output text 2>/dev/null || echo "")
+            
+            if [ -n "$TARGET_GROUPS" ]; then
+              LB_ARN=$(echo $TARGET_GROUPS | awk '{print $1}')
+              echo "LoadBalancer ARN: $LB_ARN"
+              
+              # Get target groups
+              TG_ARNS=$(aws elbv2 describe-target-groups --load-balancer-arn $LB_ARN --region ${{ env.AWS_REGION }} --query 'TargetGroups[*].TargetGroupArn' --output text 2>/dev/null || echo "")
+              
+              if [ -n "$TG_ARNS" ]; then
+                echo ""
+                echo "Target Groups:"
+                for TG_ARN in $TG_ARNS; do
+                  echo "  - $TG_ARN"
+                  
+                  # Check target health
+                  echo ""
+                  echo "  Target Health:"
+                  aws elbv2 describe-target-health --target-group-arn $TG_ARN --region ${{ env.AWS_REGION }} --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State,TargetHealth.Reason]' --output table 2>/dev/null || echo "    Could not get target health"
+                done
+              else
+                echo "⚠ No target groups found for LoadBalancer"
+              fi
+            else
+              echo "⚠ Could not find LoadBalancer ARN"
+            fi
           else
             echo "⚠ LoadBalancer is still pending..."
+          fi
+          
+          echo ""
+          echo "=== CRITICAL: Checking if Pods are Running ==="
+          RUNNING_PODS=$(kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+          if [ -z "$RUNNING_PODS" ]; then
+            echo "❌ NO PODS ARE RUNNING!"
+            echo "This is why the LoadBalancer connection times out."
+            echo ""
+            echo "All pods:"
+            kubectl get pods -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}
+            echo ""
+            echo "Check the 'Check pod status and events' step in the deploy-to-cluster job for details."
+          else
+            echo "✓ Running pods: $RUNNING_PODS"
           fi
 
       - name: Check ExternalDNS Status
