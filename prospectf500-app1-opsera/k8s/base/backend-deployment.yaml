@@ -30,6 +30,12 @@ spec:
           env:
             - name: ENVIRONMENT
               value: "dev"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-api-key
+                  key: OPENAI_API_KEY
+                  optional: true
           resources:
             requests:
               memory: "128Mi"

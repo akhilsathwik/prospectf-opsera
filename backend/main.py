@@ -27,6 +27,8 @@ app.add_middleware(
         "http://localhost:5173",
         "http://localhost:3000",
         "https://speri-008-dev.agents.opsera-labs.com",  # Production URL
+        "http://prospectf500-app1-dev.agents.opsera-labs.com",  # Current deployment
+        "https://prospectf500-app1-dev.agents.opsera-labs.com",  # HTTPS (when configured)
     ],
     allow_credentials=True,
     allow_methods=["*"],
