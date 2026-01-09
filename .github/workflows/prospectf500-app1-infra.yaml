@@ -368,6 +368,22 @@ jobs:
           echo ""
           echo "=== ExternalDNS Installation Complete ==="
           kubectl get pods -n kube-system -l app=external-dns
+          
+          echo ""
+          echo "=== Waiting for ExternalDNS to be ready ==="
+          sleep 10
+          
+          # Check if ExternalDNS pod is running
+          EXTERNALDNS_READY=$(kubectl get pods -n kube-system -l app=external-dns -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Unknown")
+          if [ "$EXTERNALDNS_READY" != "Running" ]; then
+            echo "⚠ ExternalDNS pod not running. Checking logs..."
+            kubectl logs -n kube-system -l app=external-dns --tail=20 || true
+            echo ""
+            echo "If you see 'AccessDenied' errors, the IAM role trust policy may need updating."
+            echo "Run Terraform apply to update the IAM role with the correct OIDC issuer URL."
+          else
+            echo "✓ ExternalDNS pod is running"
+          fi
 
   setup-argocd-app:
     name: "Setup ArgoCD Application"
