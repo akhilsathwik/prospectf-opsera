@@ -426,6 +426,69 @@ jobs:
           
           echo "✓ Image names verified"
 
+      - name: Configure ACM Certificate for HTTPS
+        if: steps.check-cluster.outputs.cluster_exists == 'true'
+        continue-on-error: true
+        run: |
+          echo "=== Configuring ACM Certificate for HTTPS ==="
+          
+          # Get ACM certificate ARN from Terraform output
+          cd ${{ github.workspace }}/prospectf500-app1-opsera/terraform
+          
+          # Setup Terraform to get outputs
+          terraform init -backend-config="bucket=${{ env.APP_IDENTIFIER }}-tfstate" \
+                         -backend-config="key=infrastructure/terraform.tfstate" \
+                         -backend-config="region=${{ env.AWS_REGION }}" \
+                         -backend-config="dynamodb_table=${{ env.APP_IDENTIFIER }}-tfstate-lock" \
+                         -backend-config="encrypt=true" || {
+            echo "⚠ Terraform init failed - certificate may not be created yet"
+            echo "Run infrastructure workflow with 'apply' action to create ACM certificate"
+            exit 0
+          }
+          
+          CERT_ARN=$(terraform output -raw acm_certificate_arn 2>/dev/null || echo "")
+          
+          if [ -z "$CERT_ARN" ] || [ "$CERT_ARN" == "" ]; then
+            echo "⚠ ACM certificate ARN not found in Terraform output"
+            echo "This means:"
+            echo "  1. Certificate may not be created yet (run infrastructure workflow)"
+            echo "  2. Certificate may still be validating (can take 5-30 minutes)"
+            echo ""
+            echo "HTTPS will not work until certificate is validated and configured"
+            echo "HTTP will continue to work"
+            exit 0
+          fi
+          
+          echo "Found ACM Certificate ARN: $CERT_ARN"
+          
+          # Check if certificate is validated
+          CERT_STATUS=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" --region ${{ env.AWS_REGION }} --query 'Certificate.Status' --output text 2>/dev/null || echo "UNKNOWN")
+          echo "Certificate Status: $CERT_STATUS"
+          
+          if [ "$CERT_STATUS" != "ISSUED" ]; then
+            echo "⚠ Certificate is not yet issued (Status: $CERT_STATUS)"
+            echo "Certificate validation can take 5-30 minutes after DNS records are created"
+            echo "HTTPS will work once certificate status is 'ISSUED'"
+            exit 0
+          fi
+          
+          echo "✓ Certificate is ISSUED - configuring LoadBalancer..."
+          
+          # Update frontend service with certificate ARN
+          kubectl annotate service ${{ env.APP_IDENTIFIER }}-frontend \
+            -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} \
+            service.beta.kubernetes.io/aws-load-balancer-ssl-cert="$CERT_ARN" \
+            --overwrite || {
+            echo "⚠ Failed to update service annotation"
+            echo "You may need to manually update the service or restart it"
+            exit 0
+          }
+          
+          echo "✓ Service annotation updated with certificate ARN"
+          echo ""
+          echo "Note: LoadBalancer may take 2-5 minutes to reconfigure with SSL"
+          echo "HTTPS endpoint will be available at: https://${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}.agents.opsera-labs.com"
+
       - name: Clean up pods with InvalidImageName
         if: steps.check-cluster.outputs.cluster_exists == 'true'
         continue-on-error: true
