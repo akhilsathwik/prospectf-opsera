@@ -941,13 +941,34 @@ jobs:
           fi
 
       - name: Verify DNS endpoint (HTTPS/HTTP)
-        if: steps.lb.outputs.lb_http_working == 'true'
+        if: steps.lb.outputs.lb_ready == 'true'
         run: |
           DOMAIN="${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}.agents.opsera-labs.com"
           echo "=== Testing DNS Endpoint ==="
           echo "Testing: https://$DOMAIN (then http://$DOMAIN)"
+          echo ""
+          echo "Note: This step runs independently of LoadBalancer HTTP check"
+          echo "It verifies if DNS record exists and endpoint is accessible"
+          echo ""
+          
+          # First check if DNS resolves
+          DNS_IP=$(dig +short $DOMAIN | head -1 || echo "")
+          if [ -z "$DNS_IP" ] || [ "$DNS_IP" = "" ]; then
+            echo "⚠ DNS does not resolve yet - ExternalDNS may not have created the record"
+            echo "This is normal and expected if:"
+            echo "  - ExternalDNS is still processing (takes 1-2 minutes)"
+            echo "  - DNS propagation is in progress (takes 5-10 minutes)"
+            echo ""
+            echo "The LoadBalancer URL should work immediately:"
+            echo "  http://${{ steps.lb.outputs.lb_hostname }}"
+            exit 0
+          fi
+          
+          echo "✓ DNS resolves to: $DNS_IP"
+          echo ""
           
           # Try HTTPS first
+          echo "Attempting HTTPS connection..."
           for i in {1..5}; do
             HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 -k "https://$DOMAIN" 2>/dev/null || echo "000")
             echo "HTTPS Attempt $i/5: HTTP Status = $HTTP_STATUS"
@@ -965,7 +986,7 @@ jobs:
           
           # Try HTTP if HTTPS fails
           echo ""
-          echo "HTTPS not working, trying HTTP..."
+          echo "HTTPS not working (may not have SSL certificate yet), trying HTTP..."
           for i in {1..5}; do
             HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 "http://$DOMAIN" 2>/dev/null || echo "000")
             echo "HTTP Attempt $i/5: HTTP Status = $HTTP_STATUS"
@@ -975,7 +996,7 @@ jobs:
               echo "=========================================="
               echo "✓ DEPLOYMENT SUCCESSFUL (HTTP)"
               echo "Endpoint: http://$DOMAIN"
-              echo "Note: HTTPS not configured yet"
+              echo "Note: HTTPS not configured yet (SSL certificate pending)"
               echo "=========================================="
               exit 0
             fi
@@ -985,6 +1006,9 @@ jobs:
           echo ""
           echo "⚠ DNS endpoint not responding yet"
           echo "This may be normal - DNS propagation can take 5-10 minutes"
+          echo ""
+          echo "You can still access the application via LoadBalancer URL:"
+          echo "  http://${{ steps.lb.outputs.lb_hostname }}"
 
       - name: Summary
         if: always()
