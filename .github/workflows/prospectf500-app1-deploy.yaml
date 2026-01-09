@@ -143,11 +143,12 @@ jobs:
           cat kustomization.yaml
           echo ""
 
-          # Validate no placeholders remain
-          if grep -q "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
+          # Validate no placeholders remain (exclude comments)
+          # Check only in actual values, not in comments
+          if grep -v "^[[:space:]]*#" kustomization.yaml | grep -q "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME"; then
             echo "ERROR: Placeholders found in kustomization.yaml after replacement!"
-            echo "Remaining placeholders:"
-            grep -n "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml || true
+            echo "Remaining placeholders (excluding comments):"
+            grep -v "^[[:space:]]*#" kustomization.yaml | grep -n "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" || true
             exit 1
           fi
           
@@ -281,10 +282,12 @@ jobs:
           cat kustomization.yaml
           echo ""
           
-          # Verify no placeholders remain
-          if grep -q "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
+          # Verify no placeholders remain (exclude comments)
+          # Check only in actual values, not in comments
+          if grep -v "^[[:space:]]*#" kustomization.yaml | grep -q "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME"; then
             echo "❌ ERROR: Placeholders still found in kustomization.yaml!"
-            grep -n "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml
+            echo "Remaining placeholders (excluding comments):"
+            grep -v "^[[:space:]]*#" kustomization.yaml | grep -n "ECR_REGISTRY\|ACCOUNT_ID\|PLACEHOLDER\|TODO\|CHANGEME"
             exit 1
           fi
           
