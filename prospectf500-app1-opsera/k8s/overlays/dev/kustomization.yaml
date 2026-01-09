@@ -11,7 +11,7 @@ resources:
 images:
   - name: prospectf500-app1-backend
     newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
-    newTag: "e74db07"
+    newTag: "7ecd6de"
   - name: prospectf500-app1-frontend
     newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-frontend
-    newTag: "e74db07"
+    newTag: "7ecd6de"
