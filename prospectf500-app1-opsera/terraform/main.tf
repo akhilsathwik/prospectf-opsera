@@ -190,6 +190,11 @@ module "workload_cluster" {
 # ============================================================================
 # ExternalDNS IAM Role (for workload cluster)
 # ============================================================================
+# Get OIDC issuer URL from cluster
+data "aws_eks_cluster" "workload" {
+  name = module.workload_cluster.cluster_name
+}
+
 resource "aws_iam_role" "external_dns" {
   name = "${var.app_identifier}-external-dns"
 
@@ -204,8 +209,8 @@ resource "aws_iam_role" "external_dns" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringEquals = {
-            "${module.workload_cluster.oidc_provider_arn}:sub" = "system:serviceaccount:kube-system:external-dns"
-            "${module.workload_cluster.oidc_provider_arn}:aud" = "sts.amazonaws.com"
+            "${replace(data.aws_eks_cluster.workload.identity[0].oidc[0].issuer, "https://", "")}:sub" = "system:serviceaccount:kube-system:external-dns"
+            "${replace(data.aws_eks_cluster.workload.identity[0].oidc[0].issuer, "https://", "")}:aud" = "sts.amazonaws.com"
           }
         }
       }
