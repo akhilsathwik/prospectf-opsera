@@ -13,9 +13,9 @@ on:
           - apply
           - destroy
       branch:
-        description: 'Branch to use (default: main)'
+        description: 'Branch to use (default: prospectf500-app1-opsera)'
         required: false
-        default: 'main'
+        default: 'prospectf500-app1-opsera'
         type: string
 
 env:
