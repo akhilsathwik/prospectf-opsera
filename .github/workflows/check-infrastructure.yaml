@@ -1,0 +1,214 @@
+name: "Check Infrastructure Status"
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-north-1
+  APP_IDENTIFIER: prospectf500-app1
+  TENANT: opsera-se
+  ENVIRONMENT: dev
+
+jobs:
+  check-infrastructure:
+    name: "Infrastructure Status Check"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check EKS Clusters
+        run: |
+          echo "========================================"
+          echo "📋 EKS CLUSTER STATUS"
+          echo "========================================"
+          echo ""
+          
+          # Expected cluster names from Terraform
+          ARGOCD_CLUSTER="${{ env.APP_IDENTIFIER }}-cd"
+          WORKLOAD_CLUSTER="${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }}"
+          
+          echo "Checking ArgoCD Cluster: $ARGOCD_CLUSTER"
+          if aws eks describe-cluster --name "$ARGOCD_CLUSTER" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✅ ArgoCD Cluster EXISTS"
+            aws eks describe-cluster --name "$ARGOCD_CLUSTER" --region ${{ env.AWS_REGION }} \
+              --query 'cluster.{Name:name,Status:status,Version:version,Endpoint:endpoint,PublicAccess:resourcesVpcConfig.endpointPublicAccess}' \
+              --output table
+          else
+            echo "❌ ArgoCD Cluster NOT FOUND"
+          fi
+          
+          echo ""
+          echo "Checking Workload Cluster: $WORKLOAD_CLUSTER"
+          if aws eks describe-cluster --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✅ Workload Cluster EXISTS"
+            aws eks describe-cluster --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }} \
+              --query 'cluster.{Name:name,Status:status,Version:version,Endpoint:endpoint,PublicAccess:resourcesVpcConfig.endpointPublicAccess}' \
+              --output table
+          else
+            echo "❌ Workload Cluster NOT FOUND"
+          fi
+          
+          echo ""
+          echo "========================================"
+          echo "📋 ALL EKS CLUSTERS IN REGION"
+          echo "========================================"
+          aws eks list-clusters --region ${{ env.AWS_REGION }} --output table
+
+      - name: Check ECR Repositories
+        run: |
+          echo ""
+          echo "========================================"
+          echo "📋 ECR REPOSITORY STATUS"
+          echo "========================================"
+          echo ""
+          
+          BACKEND_REPO="${{ env.APP_IDENTIFIER }}-backend"
+          FRONTEND_REPO="${{ env.APP_IDENTIFIER }}-frontend"
+          
+          echo "Checking Backend Repository: $BACKEND_REPO"
+          if aws ecr describe-repositories --repository-names "$BACKEND_REPO" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✅ Backend Repository EXISTS"
+            aws ecr describe-repositories --repository-names "$BACKEND_REPO" --region ${{ env.AWS_REGION }} \
+              --query 'repositories[0].{Name:repositoryName,URI:repositoryUri,Created:createdAt}' \
+              --output table
+          else
+            echo "❌ Backend Repository NOT FOUND"
+          fi
+          
+          echo ""
+          echo "Checking Frontend Repository: $FRONTEND_REPO"
+          if aws ecr describe-repositories --repository-names "$FRONTEND_REPO" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✅ Frontend Repository EXISTS"
+            aws ecr describe-repositories --repository-names "$FRONTEND_REPO" --region ${{ env.AWS_REGION }} \
+              --query 'repositories[0].{Name:repositoryName,URI:repositoryUri,Created:createdAt}' \
+              --output table
+          else
+            echo "❌ Frontend Repository NOT FOUND"
+          fi
+
+      - name: Check IAM Roles
+        run: |
+          echo ""
+          echo "========================================"
+          echo "📋 IAM ROLE STATUS"
+          echo "========================================"
+          echo ""
+          
+          EXTERNALDNS_ROLE="${{ env.APP_IDENTIFIER }}-external-dns"
+          
+          echo "Checking ExternalDNS IAM Role: $EXTERNALDNS_ROLE"
+          if aws iam get-role --role-name "$EXTERNALDNS_ROLE" 2>/dev/null; then
+            echo "✅ ExternalDNS IAM Role EXISTS"
+            aws iam get-role --role-name "$EXTERNALDNS_ROLE" \
+              --query 'Role.{Name:RoleName,ARN:Arn,Created:CreateDate}' \
+              --output table
+            
+            echo ""
+            echo "Trust Policy:"
+            aws iam get-role --role-name "$EXTERNALDNS_ROLE" \
+              --query 'Role.AssumeRolePolicyDocument' \
+              --output json | jq .
+          else
+            echo "❌ ExternalDNS IAM Role NOT FOUND"
+          fi
+
+      - name: Check Kubernetes Resources (if clusters exist)
+        run: |
+          echo ""
+          echo "========================================"
+          echo "📋 KUBERNETES RESOURCES STATUS"
+          echo "========================================"
+          echo ""
+          
+          WORKLOAD_CLUSTER="${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }}"
+          NAMESPACE="${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}"
+          
+          # Check if workload cluster exists
+          if aws eks describe-cluster --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "Configuring kubectl for workload cluster..."
+            aws eks update-kubeconfig --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }}
+            
+            echo ""
+            echo "=== Namespaces ==="
+            kubectl get namespaces | grep -E "NAME|${{ env.APP_IDENTIFIER }}" || echo "No app namespaces found"
+            
+            echo ""
+            echo "=== Deployments in $NAMESPACE ==="
+            if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
+              kubectl get deployments -n "$NAMESPACE" || echo "No deployments found"
+              
+              echo ""
+              echo "=== Services in $NAMESPACE ==="
+              kubectl get services -n "$NAMESPACE" || echo "No services found"
+              
+              echo ""
+              echo "=== Pods in $NAMESPACE ==="
+              kubectl get pods -n "$NAMESPACE" || echo "No pods found"
+            else
+              echo "Namespace $NAMESPACE does not exist"
+            fi
+            
+            echo ""
+            echo "=== ExternalDNS Pod Status ==="
+            kubectl get pods -n kube-system -l app=external-dns || echo "ExternalDNS not installed"
+            
+            echo ""
+            echo "=== ExternalDNS Logs (last 20 lines) ==="
+            kubectl logs -n kube-system -l app=external-dns --tail=20 2>/dev/null || echo "No ExternalDNS logs available"
+          else
+            echo "Workload cluster not found - skipping Kubernetes checks"
+          fi
+
+      - name: Check Route53 DNS Records
+        run: |
+          echo ""
+          echo "========================================"
+          echo "📋 ROUTE53 DNS STATUS"
+          echo "========================================"
+          echo ""
+          
+          DOMAIN="prospectf500-app1-dev.agents.opsera-labs.com"
+          HOSTED_ZONE_ID="Z00814191D1XSXELJVTKT"
+          
+          echo "Checking DNS record: $DOMAIN"
+          if aws route53 list-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --query "ResourceRecordSets[?Name=='${DOMAIN}.']" \
+            --output json 2>/dev/null | jq -e '.[]' > /dev/null; then
+            echo "✅ DNS Record EXISTS"
+            aws route53 list-resource-record-sets \
+              --hosted-zone-id "$HOSTED_ZONE_ID" \
+              --query "ResourceRecordSets[?Name=='${DOMAIN}.']" \
+              --output table
+          else
+            echo "❌ DNS Record NOT FOUND"
+            echo "This is expected if ExternalDNS hasn't created it yet"
+          fi
+
+      - name: Summary Report
+        run: |
+          echo ""
+          echo "========================================"
+          echo "📋 INFRASTRUCTURE SUMMARY"
+          echo "========================================"
+          echo ""
+          echo "Configuration:"
+          echo "  Tenant: ${{ env.TENANT }}"
+          echo "  App: ${{ env.APP_IDENTIFIER }}"
+          echo "  Environment: ${{ env.ENVIRONMENT }}"
+          echo "  Region: ${{ env.AWS_REGION }}"
+          echo ""
+          echo "Expected Resources:"
+          echo "  ArgoCD Cluster: ${{ env.APP_IDENTIFIER }}-cd"
+          echo "  Workload Cluster: ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }}"
+          echo "  Backend ECR: ${{ env.APP_IDENTIFIER }}-backend"
+          echo "  Frontend ECR: ${{ env.APP_IDENTIFIER }}-frontend"
+          echo "  ExternalDNS Role: ${{ env.APP_IDENTIFIER }}-external-dns"
+          echo "  Namespace: ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}"
+          echo ""
