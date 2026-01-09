@@ -7,7 +7,7 @@ resources:
   - ../../base
 
 # Image tags will be updated by GitHub Actions workflow
-# Placeholders will be replaced: 792373136340.dkr.ecr.eu-north-1.amazonaws.com -> actual ECR registry URL
+# ECR registry URLs will be updated automatically during deployment
 images:
   - name: prospectf500-app1-backend
     newName: 792373136340.dkr.ecr.eu-north-1.amazonaws.com/prospectf500-app1-backend
