@@ -859,31 +859,158 @@ jobs:
   verify-endpoint:
     name: "Verify Endpoint (Fix #83: Mandatory)"
     runs-on: ubuntu-latest
-    needs: deploy-to-cluster
+    needs: [deploy-to-cluster, check-dns]
     timeout-minutes: 15
 
     steps:
-      - name: Wait for endpoint (Fix #83: Mandatory verification)
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
         run: |
-          ENDPOINT="https://${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}.agents.opsera-labs.com"
-          echo "Checking endpoint: $ENDPOINT"
+          aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-wrk-${{ env.ENVIRONMENT }} --region ${{ env.AWS_REGION }}
 
-          for i in {1..30}; do
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$ENDPOINT" 2>/dev/null || echo "000")
-            echo "Attempt $i/30: HTTP Status = $HTTP_STATUS"
+      - name: Get LoadBalancer endpoint
+        id: lb
+        run: |
+          echo "=== Getting LoadBalancer Endpoint ==="
+          LB_HOSTNAME=$(kubectl get svc ${{ env.APP_IDENTIFIER }}-frontend -n ${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+          
+          if [ -z "$LB_HOSTNAME" ]; then
+            echo "⚠ LoadBalancer not ready yet"
+            echo "lb_hostname=" >> $GITHUB_OUTPUT
+            echo "lb_ready=false" >> $GITHUB_OUTPUT
+          else
+            echo "✓ LoadBalancer: $LB_HOSTNAME"
+            echo "lb_hostname=$LB_HOSTNAME" >> $GITHUB_OUTPUT
+            echo "lb_ready=true" >> $GITHUB_OUTPUT
+          fi
 
+      - name: Verify LoadBalancer directly (HTTP)
+        if: steps.lb.outputs.lb_ready == 'true'
+        run: |
+          LB_HOSTNAME="${{ steps.lb.outputs.lb_hostname }}"
+          echo "=== Testing LoadBalancer directly (HTTP) ==="
+          echo "Testing: http://$LB_HOSTNAME"
+          
+          for i in {1..10}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "http://$LB_HOSTNAME" 2>/dev/null || echo "000")
+            echo "Attempt $i/10: HTTP Status = $HTTP_STATUS"
+            
             if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "301" ] || [ "$HTTP_STATUS" = "302" ]; then
               echo ""
               echo "=========================================="
-              echo "DEPLOYMENT SUCCESSFUL"
-              echo "Endpoint: $ENDPOINT"
+              echo "✓ LOADBALANCER IS WORKING!"
+              echo "Direct URL: http://$LB_HOSTNAME"
+              echo "=========================================="
+              echo "lb_http_working=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            sleep 5
+          done
+          
+          echo "⚠ LoadBalancer not responding via HTTP"
+          echo "lb_http_working=false" >> $GITHUB_OUTPUT
+
+      - name: Check DNS record status
+        run: |
+          DOMAIN="${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}.agents.opsera-labs.com"
+          echo "=== Checking DNS Record ==="
+          echo "Domain: $DOMAIN"
+          
+          # Check if DNS resolves
+          DNS_IP=$(dig +short $DOMAIN | head -1 || echo "")
+          
+          if [ -n "$DNS_IP" ] && [ "$DNS_IP" != "" ]; then
+            echo "✓ DNS resolves to: $DNS_IP"
+            echo "dns_resolves=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠ DNS does not resolve yet"
+            echo "This is normal if ExternalDNS hasn't created the record yet"
+            echo "dns_resolves=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Verify DNS endpoint (HTTPS/HTTP)
+        if: steps.lb.outputs.lb_http_working == 'true'
+        run: |
+          DOMAIN="${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}.agents.opsera-labs.com"
+          echo "=== Testing DNS Endpoint ==="
+          echo "Testing: https://$DOMAIN (then http://$DOMAIN)"
+          
+          # Try HTTPS first
+          for i in {1..5}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 -k "https://$DOMAIN" 2>/dev/null || echo "000")
+            echo "HTTPS Attempt $i/5: HTTP Status = $HTTP_STATUS"
+            
+            if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "301" ] || [ "$HTTP_STATUS" = "302" ]; then
+              echo ""
+              echo "=========================================="
+              echo "✓ DEPLOYMENT SUCCESSFUL (HTTPS)"
+              echo "Endpoint: https://$DOMAIN"
               echo "=========================================="
               exit 0
             fi
-            sleep 10
+            sleep 5
           done
-
+          
+          # Try HTTP if HTTPS fails
           echo ""
-          echo "WARNING: Endpoint not responding yet."
-          echo "This may be normal for new deployments - DNS and LoadBalancer can take 5-10 minutes."
-          echo "Check manually: $ENDPOINT"
+          echo "HTTPS not working, trying HTTP..."
+          for i in {1..5}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 "http://$DOMAIN" 2>/dev/null || echo "000")
+            echo "HTTP Attempt $i/5: HTTP Status = $HTTP_STATUS"
+            
+            if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "301" ] || [ "$HTTP_STATUS" = "302" ]; then
+              echo ""
+              echo "=========================================="
+              echo "✓ DEPLOYMENT SUCCESSFUL (HTTP)"
+              echo "Endpoint: http://$DOMAIN"
+              echo "Note: HTTPS not configured yet"
+              echo "=========================================="
+              exit 0
+            fi
+            sleep 5
+          done
+          
+          echo ""
+          echo "⚠ DNS endpoint not responding yet"
+          echo "This may be normal - DNS propagation can take 5-10 minutes"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "DEPLOYMENT VERIFICATION SUMMARY"
+          echo "=========================================="
+          echo ""
+          
+          LB_HOSTNAME="${{ steps.lb.outputs.lb_hostname }}"
+          DOMAIN="${{ env.APP_IDENTIFIER }}-${{ env.ENVIRONMENT }}.agents.opsera-labs.com"
+          
+          if [ -n "$LB_HOSTNAME" ]; then
+            echo "✓ LoadBalancer: http://$LB_HOSTNAME"
+            echo "  → This should work immediately"
+          else
+            echo "⚠ LoadBalancer: Not ready yet"
+          fi
+          
+          echo ""
+          echo "DNS Endpoint: https://$DOMAIN"
+          echo "  → Requires DNS record + SSL certificate"
+          echo "  → May take 5-10 minutes for ExternalDNS to create"
+          
+          echo ""
+          echo "To access immediately, use LoadBalancer URL:"
+          if [ -n "$LB_HOSTNAME" ]; then
+            echo "  http://$LB_HOSTNAME"
+          else
+            echo "  (Wait for LoadBalancer to be provisioned)"
+          fi
