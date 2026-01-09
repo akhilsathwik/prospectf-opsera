@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: your-username-dev
+  labels:
+    name: your-username-dev
+    tenant: opsera-se
+    environment: dev
+    managed-by: argocd

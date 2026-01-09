@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: your-username-backend
+  namespace: your-username-dev
+  labels:
+    app: your-username-backend
+    component: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: your-username-backend
+  template:
+    metadata:
+      labels:
+        app: your-username-backend
+        component: backend
+    spec:
+      containers:
+      - name: backend
+        image: PLACEHOLDER_ECR_BACKEND
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: your-username-secrets
+              key: openai-api-key
+              optional: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5

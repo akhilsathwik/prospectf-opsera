@@ -1,0 +1,500 @@
+name: "your-username Deploy"
+
+on:
+  push:
+    branches:
+      - main
+      - your-username-opsera
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'your-username-opsera/k8s/**'
+      - '.github/workflows/your-username-deploy.yaml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-north-1
+  APP_IDENTIFIER: your-username
+  TENANT: opsera-se
+  ENVIRONMENT: dev
+
+permissions:
+  contents: write
+
+jobs:
+  discover-infrastructure:
+    name: "Discover Infrastructure"
+    runs-on: ubuntu-latest
+    outputs:
+      argocd_cluster: ${{ steps.discover.outputs.argocd_cluster }}
+      workload_cluster: ${{ steps.discover.outputs.workload_cluster }}
+      argocd_exists: ${{ steps.discover.outputs.argocd_exists }}
+      workload_exists: ${{ steps.discover.outputs.workload_exists }}
+      ecr_exists: ${{ steps.discover.outputs.ecr_exists }}
+      deployment_type: ${{ steps.discover.outputs.deployment_type }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Discover infrastructure
+        id: discover
+        run: |
+          echo "========================================"
+          echo "📋 INFRASTRUCTURE DISCOVERY"
+          echo "========================================"
+
+          # Derive cluster environment from app_env
+          if [ "${{ env.ENVIRONMENT }}" = "prod" ]; then
+            CLUSTER_ENV="prod"
+          else
+            CLUSTER_ENV="nonprod"
+          fi
+          echo "cluster_env=$CLUSTER_ENV" >> $GITHUB_OUTPUT
+
+          # Build resource names
+          ARGOCD_CLUSTER="argocd-${{ env.AWS_REGION }}"
+          WORKLOAD_CLUSTER="${{ env.TENANT }}-${{ env.AWS_REGION }}-${CLUSTER_ENV}"
+          ECR_REPO_BACKEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend"
+          ECR_REPO_FRONTEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend"
+
+          echo "argocd_cluster=$ARGOCD_CLUSTER" >> $GITHUB_OUTPUT
+          echo "workload_cluster=$WORKLOAD_CLUSTER" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "Target Resources:"
+          echo "  ArgoCD Cluster:   $ARGOCD_CLUSTER (shared)"
+          echo "  Workload Cluster: $WORKLOAD_CLUSTER (tenant)"
+          echo "  ECR Backend:      $ECR_REPO_BACKEND"
+          echo "  ECR Frontend:     $ECR_REPO_FRONTEND"
+          echo ""
+
+          # Check ArgoCD Cluster
+          echo "Checking ArgoCD Cluster: $ARGOCD_CLUSTER..."
+          if aws eks describe-cluster --name "$ARGOCD_CLUSTER" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            ARGOCD_EXISTS="true"
+            ARGOCD_STATUS="✅ EXISTS"
+            echo "argocd_exists=true" >> $GITHUB_OUTPUT
+          else
+            ARGOCD_EXISTS="false"
+            ARGOCD_STATUS="❌ NOT FOUND"
+            echo "argocd_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Check Workload Cluster
+          echo "Checking Workload Cluster: $WORKLOAD_CLUSTER..."
+          if aws eks describe-cluster --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            WORKLOAD_EXISTS="true"
+            WORKLOAD_STATUS="✅ EXISTS"
+            echo "workload_exists=true" >> $GITHUB_OUTPUT
+          else
+            WORKLOAD_EXISTS="false"
+            WORKLOAD_STATUS="❌ NOT FOUND"
+            echo "workload_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Check ECR Repositories
+          ECR_BACKEND_EXISTS="false"
+          ECR_FRONTEND_EXISTS="false"
+          
+          if aws ecr describe-repositories --repository-names "$ECR_REPO_BACKEND" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            ECR_BACKEND_EXISTS="true"
+          fi
+          
+          if aws ecr describe-repositories --repository-names "$ECR_REPO_FRONTEND" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            ECR_FRONTEND_EXISTS="true"
+          fi
+
+          if [ "$ECR_BACKEND_EXISTS" = "true" ] && [ "$ECR_FRONTEND_EXISTS" = "true" ]; then
+            ECR_EXISTS="true"
+            echo "ecr_exists=true" >> $GITHUB_OUTPUT
+          else
+            ECR_EXISTS="false"
+            echo "ecr_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Determine deployment type
+          if [ "$ARGOCD_EXISTS" = "true" ] && [ "$WORKLOAD_EXISTS" = "true" ]; then
+            DEPLOY_TYPE="brownfield"
+          elif [ "$ARGOCD_EXISTS" = "true" ] && [ "$WORKLOAD_EXISTS" = "false" ]; then
+            DEPLOY_TYPE="partial"
+          else
+            DEPLOY_TYPE="greenfield"
+          fi
+          echo "deployment_type=$DEPLOY_TYPE" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "========================================"
+          echo "📋 INFRASTRUCTURE STATUS REPORT"
+          echo "========================================"
+          echo ""
+          echo "ArgoCD Cluster: $ARGOCD_CLUSTER (shared)"
+          echo "  ├─ Status: $ARGOCD_STATUS"
+          echo ""
+          echo "Workload Cluster: $WORKLOAD_CLUSTER (tenant)"
+          echo "  ├─ Status: $WORKLOAD_STATUS"
+          echo ""
+          echo "ECR Repositories:"
+          echo "  ├─ Backend: $ECR_REPO_BACKEND ($([ "$ECR_BACKEND_EXISTS" = "true" ] && echo "✅ EXISTS" || echo "❌ NOT FOUND"))"
+          echo "  └─ Frontend: $ECR_REPO_FRONTEND ($([ "$ECR_FRONTEND_EXISTS" = "true" ] && echo "✅ EXISTS" || echo "❌ NOT FOUND"))"
+          echo ""
+          echo "========================================"
+          echo "DEPLOYMENT TYPE: $DEPLOY_TYPE"
+          echo "========================================"
+
+  build-and-push:
+    name: "Build and Push Images"
+    runs-on: ubuntu-latest
+    needs: discover-infrastructure
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+      aws_account_id: ${{ steps.vars.outputs.aws_account_id }}
+      ecr_registry: ${{ steps.vars.outputs.ecr_registry }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up variables
+        id: vars
+        run: |
+          IMAGE_TAG=$(echo ${{ github.sha }} | cut -c1-7)
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "aws_account_id=$AWS_ACCOUNT_ID" >> $GITHUB_OUTPUT
+          echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+          
+          echo "Image tag: $IMAGE_TAG"
+          echo "AWS Account ID: $AWS_ACCOUNT_ID"
+          echo "ECR Registry: $ECR_REGISTRY"
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repos if not exist
+        run: |
+          ECR_REPO_BACKEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend"
+          ECR_REPO_FRONTEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend"
+
+          aws ecr describe-repositories --repository-names "$ECR_REPO_BACKEND" --region ${{ env.AWS_REGION }} 2>/dev/null || \
+            aws ecr create-repository --repository-name "$ECR_REPO_BACKEND" --region ${{ env.AWS_REGION }} --image-scanning-configuration scanOnPush=true
+
+          aws ecr describe-repositories --repository-names "$ECR_REPO_FRONTEND" --region ${{ env.AWS_REGION }} 2>/dev/null || \
+            aws ecr create-repository --repository-name "$ECR_REPO_FRONTEND" --region ${{ env.AWS_REGION }} --image-scanning-configuration scanOnPush=true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend:${{ steps.vars.outputs.image_tag }}
+            ${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend:latest
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend:${{ steps.vars.outputs.image_tag }}
+            ${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend:latest
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Grype Security Scan
+        uses: anchore/scan-action@v3
+        id: scan
+        with:
+          image: "${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend:${{ steps.vars.outputs.image_tag }}"
+          fail-build: false
+          severity-cutoff: high
+
+      - name: Check security scan results
+        run: |
+          if [ "${{ steps.scan.outputs.vulnerabilities-high }}" -gt 10 ] || [ "${{ steps.scan.outputs.vulnerabilities-critical }}" -gt 0 ]; then
+            echo "❌ Security scan failed: ${{ steps.scan.outputs.vulnerabilities-critical }} critical, ${{ steps.scan.outputs.vulnerabilities-high }} high"
+            exit 1
+          fi
+          echo "✅ Security scan passed"
+
+  update-manifests:
+    name: "Update K8s Manifests"
+    runs-on: ubuntu-latest
+    needs: [discover-infrastructure, build-and-push]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update kustomization with new image tags
+        run: |
+          cd your-username-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+
+          # Get AWS Account ID
+          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
+          ECR_REGISTRY="${{ needs.build-and-push.outputs.ecr_registry }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          APP_IDENTIFIER="${{ env.APP_IDENTIFIER }}"
+          TENANT="${{ env.TENANT }}"
+
+          ECR_BACKEND="${ECR_REGISTRY}/${TENANT}/${APP_IDENTIFIER}-backend"
+          ECR_FRONTEND="${ECR_REGISTRY}/${TENANT}/${APP_IDENTIFIER}-frontend"
+
+          echo "Replacing placeholders:"
+          echo "  AWS_ACCOUNT_ID: $AWS_ACCOUNT_ID"
+          echo "  ECR_REGISTRY: $ECR_REGISTRY"
+          echo "  ECR_BACKEND: $ECR_BACKEND"
+          echo "  ECR_FRONTEND: $ECR_FRONTEND"
+          echo "  IMAGE_TAG: $IMAGE_TAG"
+
+          # Replace PLACEHOLDER_ECR_BACKEND
+          sed -i "s|PLACEHOLDER_ECR_BACKEND|${ECR_BACKEND}|g" kustomization.yaml
+          
+          # Replace PLACEHOLDER_ECR_FRONTEND
+          sed -i "s|PLACEHOLDER_ECR_FRONTEND|${ECR_FRONTEND}|g" kustomization.yaml
+
+          # Update backend image newName
+          sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_BACKEND}|" kustomization.yaml
+
+          # Update frontend image newName
+          sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_FRONTEND}|" kustomization.yaml
+
+          # Update ALL tags
+          sed -i "s|newTag: .*|newTag: \"${IMAGE_TAG}\"|g" kustomization.yaml
+
+          echo ""
+          echo "=== Updated kustomization.yaml ==="
+          cat kustomization.yaml
+          echo ""
+
+          # Validate no placeholders remain
+          if grep -q "PLACEHOLDER\|ECR_REGISTRY\|ACCOUNT_ID\|TODO\|CHANGEME" kustomization.yaml; then
+            echo "ERROR: Placeholders found in kustomization.yaml after replacement!"
+            grep -n "PLACEHOLDER\|ECR_REGISTRY\|ACCOUNT_ID\|TODO\|CHANGEME" kustomization.yaml || true
+            exit 1
+          fi
+          
+          echo "✓ All placeholders replaced successfully"
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add your-username-opsera/k8s/overlays/${{ env.ENVIRONMENT }}/kustomization.yaml
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git pull --rebase origin main || git pull --rebase origin your-username-opsera || true
+            git commit -m "[skip ci] Update image tags to ${{ needs.build-and-push.outputs.image_tag }}"
+            git push || echo "Push conflict - will retry on next run"
+          fi
+
+  deploy-to-cluster:
+    name: "Deploy to Workload Cluster"
+    runs-on: ubuntu-latest
+    needs: [discover-infrastructure, build-and-push, update-manifests]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
+        run: |
+          WORKLOAD_CLUSTER="${{ needs.discover-infrastructure.outputs.workload_cluster }}"
+          aws eks update-kubeconfig --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }}
+
+      - name: Verify ECR images exist
+        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
+        run: |
+          echo "=== Verifying ECR images exist ==="
+          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          ECR_REPO_BACKEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend"
+          ECR_REPO_FRONTEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend"
+
+          echo "Checking backend image..."
+          aws ecr describe-images --repository-name "$ECR_REPO_BACKEND" --image-ids imageTag=$IMAGE_TAG --region ${{ env.AWS_REGION }} || {
+            echo "ERROR: Backend image with tag $IMAGE_TAG not found in ECR"
+            exit 1
+          }
+          
+          echo "Checking frontend image..."
+          aws ecr describe-images --repository-name "$ECR_REPO_FRONTEND" --image-ids imageTag=$IMAGE_TAG --region ${{ env.AWS_REGION }} || {
+            echo "ERROR: Frontend image with tag $IMAGE_TAG not found in ECR"
+            exit 1
+          }
+          
+          echo "✓ Both images exist in ECR"
+
+      - name: Update kustomization.yaml (ensure latest)
+        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
+        run: |
+          cd your-username-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+          
+          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
+          ECR_REGISTRY="${{ needs.build-and-push.outputs.ecr_registry }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          APP_IDENTIFIER="${{ env.APP_IDENTIFIER }}"
+          TENANT="${{ env.TENANT }}"
+
+          ECR_BACKEND="${ECR_REGISTRY}/${TENANT}/${APP_IDENTIFIER}-backend"
+          ECR_FRONTEND="${ECR_REGISTRY}/${TENANT}/${APP_IDENTIFIER}-frontend"
+
+          # Replace ALL placeholders
+          sed -i "s|PLACEHOLDER_ECR_BACKEND|${ECR_BACKEND}|g" kustomization.yaml
+          sed -i "s|PLACEHOLDER_ECR_FRONTEND|${ECR_FRONTEND}|g" kustomization.yaml
+          sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_BACKEND}|" kustomization.yaml
+          sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_FRONTEND}|" kustomization.yaml
+          sed -i "s|newTag: .*|newTag: \"${IMAGE_TAG}\"|g" kustomization.yaml
+
+          # Verify no placeholders remain
+          if grep -q "PLACEHOLDER\|ECR_REGISTRY\|ACCOUNT_ID\|TODO\|CHANGEME" kustomization.yaml; then
+            echo "❌ ERROR: Placeholders still found!"
+            grep -n "PLACEHOLDER\|ECR_REGISTRY\|ACCOUNT_ID\|TODO\|CHANGEME" kustomization.yaml
+            exit 1
+          fi
+
+      - name: Install kubectl and kustomize
+        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Deploy to cluster
+        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
+        run: |
+          cd your-username-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+          NAMESPACE="your-username-dev"
+
+          # Apply manifests
+          kustomize build . | kubectl apply -f -
+
+          # Wait for deployments
+          kubectl wait --for=condition=available --timeout=300s deployment/your-username-backend -n $NAMESPACE || true
+          kubectl wait --for=condition=available --timeout=300s deployment/your-username-frontend -n $NAMESPACE || true
+
+      - name: Get LoadBalancer endpoint
+        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
+        id: endpoint
+        run: |
+          NAMESPACE="your-username-dev"
+          
+          for i in {1..30}; do
+            ENDPOINT=$(kubectl get svc your-username-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            if [ -n "$ENDPOINT" ]; then
+              echo "endpoint=$ENDPOINT" >> $GITHUB_OUTPUT
+              echo "✅ LoadBalancer endpoint: $ENDPOINT"
+              break
+            fi
+            echo "Waiting for LoadBalancer... ($i/30)"
+            sleep 10
+          done
+
+  verify-endpoint:
+    name: "Verify Endpoint Accessible"
+    runs-on: ubuntu-latest
+    needs: [deploy-to-cluster]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          WORKLOAD_CLUSTER="${{ needs.discover-infrastructure.outputs.workload_cluster }}"
+          aws eks update-kubeconfig --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }}
+
+      - name: Wait for pods to be ready
+        run: |
+          NAMESPACE="your-username-dev"
+          
+          for i in {1..30}; do
+            READY=$(kubectl get pods -n $NAMESPACE -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' | tr ' ' '\n' | grep -c True || echo 0)
+            
+            echo "Attempt $i/30: $READY pods ready"
+            
+            # Check for ImagePullBackOff
+            if kubectl get pods -n $NAMESPACE | grep -q "ImagePullBackOff\|ErrImagePull"; then
+              echo "❌ ERROR: ImagePullBackOff detected!"
+              kubectl describe pods -n $NAMESPACE | grep -A5 "Events:" || true
+              exit 1
+            fi
+            
+            [ "$READY" -ge 2 ] && break
+            sleep 10
+          done
+
+      - name: Verify HTTP 200
+        run: |
+          NAMESPACE="your-username-dev"
+          
+          # Get LoadBalancer endpoint
+          for i in {1..30}; do
+            ENDPOINT=$(kubectl get svc your-username-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            if [ -n "$ENDPOINT" ]; then
+              break
+            fi
+            sleep 10
+          done
+          
+          if [ -z "$ENDPOINT" ]; then
+            echo "❌ LoadBalancer endpoint not found"
+            exit 1
+          fi
+          
+          echo "Testing endpoint: http://$ENDPOINT"
+          
+          for i in {1..30}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "http://$ENDPOINT" || echo "000")
+            echo "Attempt $i/30: HTTP $STATUS"
+            [ "$STATUS" = "200" ] && echo "✅ ENDPOINT VERIFIED" && exit 0
+            sleep 10
+          done
+          
+          echo "❌ Endpoint not responding with HTTP 200"
+          exit 1
