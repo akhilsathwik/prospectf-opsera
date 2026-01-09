@@ -130,6 +130,29 @@ jobs:
           terraform output
 
           echo ""
+          echo "=== ACM Certificate Status ==="
+          CERT_ARN=$(terraform output -raw acm_certificate_arn 2>/dev/null || echo "")
+          if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "" ]; then
+            echo "Certificate ARN: $CERT_ARN"
+            CERT_STATUS=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" --region ${{ env.AWS_REGION }} --query 'Certificate.Status' --output text 2>/dev/null || echo "UNKNOWN")
+            CERT_DOMAIN=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" --region ${{ env.AWS_REGION }} --query 'Certificate.DomainName' --output text 2>/dev/null || echo "UNKNOWN")
+            echo "Domain: $CERT_DOMAIN"
+            echo "Status: $CERT_STATUS"
+            
+            if [ "$CERT_STATUS" == "ISSUED" ]; then
+              echo "✅ Certificate is ISSUED and ready for HTTPS"
+            elif [ "$CERT_STATUS" == "PENDING_VALIDATION" ]; then
+              echo "⏳ Certificate is PENDING_VALIDATION - wait 5-30 minutes for DNS validation"
+              echo "Validation records should be created automatically via Route53"
+            else
+              echo "⚠ Certificate status: $CERT_STATUS"
+            fi
+          else
+            echo "⚠ Certificate ARN not found in Terraform output"
+            echo "Certificate may not be created yet or Terraform apply failed"
+          fi
+
+          echo ""
           echo "=== Next Steps ==="
           echo "1. Configure kubectl for ArgoCD cluster:"
           echo "   aws eks update-kubeconfig --name ${{ env.APP_IDENTIFIER }}-cd --region ${{ env.AWS_REGION }}"
