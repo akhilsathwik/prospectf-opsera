@@ -67,6 +67,46 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Auto-Update ArgoCD Application Repository URL
+        run: |
+          echo "========================================"
+          echo "AUTO-UPDATING ARGOCD APPLICATION"
+          echo "========================================"
+          
+          ARGOCD_APP="argocd-unified/application.yaml"
+          
+          if [ ! -f "$ARGOCD_APP" ]; then
+            echo "⚠️  ArgoCD application file not found: $ARGOCD_APP"
+            exit 0
+          fi
+          
+          # Get repository URL from GitHub context
+          # Format: https://github.com/owner/repo.git
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
+          
+          echo "Detected repository URL: $REPO_URL"
+          echo "Updating $ARGOCD_APP..."
+          
+          # Update repoURL in application.yaml
+          sed -i "s|repoURL:.*|repoURL: $REPO_URL|" "$ARGOCD_APP"
+          
+          echo "✅ Updated ArgoCD application manifest"
+          echo ""
+          echo "Verification:"
+          grep "repoURL:" "$ARGOCD_APP"
+          
+          # Commit the change if it was modified
+          if git diff --quiet "$ARGOCD_APP"; then
+            echo "No changes needed (already correct)"
+          else
+            echo "Changes detected, committing update..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$ARGOCD_APP"
+            git commit -m "[skip ci] Auto-update ArgoCD application repository URL" || echo "No changes to commit"
+            git push || echo "Push skipped (may already be up to date)"
+          fi
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -573,6 +613,46 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ env.DEPLOY_BRANCH }}
+
+      - name: Auto-Update ArgoCD Application Repository URL
+        run: |
+          echo "========================================"
+          echo "AUTO-UPDATING ARGOCD APPLICATION"
+          echo "========================================"
+          
+          ARGOCD_APP="argocd-unified/application.yaml"
+          
+          if [ ! -f "$ARGOCD_APP" ]; then
+            echo "⚠️  ArgoCD application file not found: $ARGOCD_APP"
+            exit 0
+          fi
+          
+          # Get repository URL from GitHub context
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
+          
+          echo "Detected repository URL: $REPO_URL"
+          echo "Updating $ARGOCD_APP..."
+          
+          # Update repoURL in application.yaml
+          sed -i "s|repoURL:.*|repoURL: $REPO_URL|" "$ARGOCD_APP"
+          
+          echo "✅ Updated ArgoCD application manifest"
+          echo ""
+          echo "Verification:"
+          grep "repoURL:" "$ARGOCD_APP"
+          
+          # Commit the change if it was modified
+          if git diff --quiet "$ARGOCD_APP"; then
+            echo "No changes needed (already correct)"
+          else
+            echo "Changes detected, committing update..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$ARGOCD_APP"
+            git commit -m "[skip ci] Auto-update ArgoCD application repository URL" || echo "No changes to commit"
+            git push || echo "Push skipped (may already be up to date)"
+          fi
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
