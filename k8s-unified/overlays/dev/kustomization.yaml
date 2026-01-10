@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: prospectf500-app1-dev
+
+resources:
+  - ../../base
+
+# Image tags will be updated by GitHub Actions workflow
+# ECR registry URLs will be updated automatically during deployment
+images:
+  - name: prospectf500-app1-backend
+    newName: ECR_REGISTRY/prospectf500-app1-backend
+    newTag: "latest"
+  - name: prospectf500-app1-frontend
+    newName: ECR_REGISTRY/prospectf500-app1-frontend
+    newTag: "latest"

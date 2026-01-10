@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prospectf500-app1-backend
+  labels:
+    app: prospectf500-app1-backend
+    tenant: opsera-se
+    app-identifier: prospectf500-app1
+    environment: dev
+    managed-by: opsera-gitops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prospectf500-app1-backend
+  template:
+    metadata:
+      labels:
+        app: prospectf500-app1-backend
+        tenant: opsera-se
+        app-identifier: prospectf500-app1
+        environment: dev
+    spec:
+      containers:
+        - name: backend
+          image: prospectf500-app1-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ENVIRONMENT
+              value: "dev"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-api-key
+                  key: OPENAI_API_KEY
+                  optional: true
+            # Learning #139: AWS credentials fallback for IRSA
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_ACCESS_KEY_ID
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            readOnlyRootFilesystem: false
+            runAsNonRoot: false
