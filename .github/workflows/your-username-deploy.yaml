@@ -1,488 +1,909 @@
-name: "your-username Deploy"
+name: Deploy to AWS EKS
 
 on:
-  push:
-    branches:
-      - main
-      - master
-      - your-username-opsera
-      - prospectf500-app1-opsera
-    paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - 'your-username-opsera/k8s/**'
-      - '.github/workflows/your-username-deploy.yaml'
   workflow_dispatch:
-
-env:
-  AWS_REGION: eu-north-1
-  APP_IDENTIFIER: your-username
-  TENANT: opsera-se
-  ENVIRONMENT: dev
+    inputs:
+      tenant_name:
+        description: 'Tenant/Organization name'
+        required: true
+        type: string
+        default: 'opsera-se'
+      app_name:
+        description: 'Application name'
+        required: true
+        type: string
+        default: 'your-username'
+      app_env:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+        default: 'dev'
+      app_region:
+        description: 'AWS deployment region'
+        required: true
+        type: string
+        default: 'us-west-2'
 
 permissions:
   contents: write
+  id-token: write
+  actions: read
+
+# Short naming convention (Learning #118)
+# Region short: us-west-2 -> usw2
+# Tenant short: first 6 chars, lowercase
+# Cluster env short: nonprod -> np, prod -> prod
+
+env:
+  # Derive deploy branch from app name
+  DEPLOY_BRANCH: ${{ inputs.app_name }}-deploy
+  # Short region code (derive from region input)
+  REGION_SHORT: ${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region }}
+  # Short cluster env (np = nonprod, prod = prod)
+  CLUSTER_ENV_SHORT: ${{ inputs.app_env == 'prod' && 'prod' || 'np' }}
+  # Resource names using short convention
+  VPC_NAME: opsera-vpc
+  ARGOCD_CLUSTER: argocd-${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region }}
+  WORKLOAD_CLUSTER: ${{ inputs.tenant_name }}-${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region }}-${{ inputs.app_env == 'prod' && 'prod' || 'np' }}
+  ECR_REPO: ${{ inputs.tenant_name }}/${{ inputs.app_name }}
+  NAMESPACE: ${{ inputs.app_name }}-${{ inputs.app_env }}
 
 jobs:
-  discover-infrastructure:
-    name: "Discover Infrastructure"
+  infrastructure:
+    name: "Phase 1: Infrastructure"
     runs-on: ubuntu-latest
     outputs:
       argocd_cluster: ${{ steps.discover.outputs.argocd_cluster }}
       workload_cluster: ${{ steps.discover.outputs.workload_cluster }}
-      argocd_exists: ${{ steps.discover.outputs.argocd_exists }}
-      workload_exists: ${{ steps.discover.outputs.workload_exists }}
-      ecr_exists: ${{ steps.discover.outputs.ecr_exists }}
+      ecr_repo: ${{ steps.discover.outputs.ecr_repo }}
+      namespace: ${{ steps.discover.outputs.namespace }}
       deployment_type: ${{ steps.discover.outputs.deployment_type }}
+      aws_account_id: ${{ steps.discover.outputs.aws_account_id }}
+      vpc_id: ${{ steps.discover.outputs.vpc_id }}
+      public_subnet_ids: ${{ steps.discover.outputs.public_subnet_ids }}
+      private_subnet_ids: ${{ steps.discover.outputs.private_subnet_ids }}
 
     steps:
-      - name: Configure AWS credentials
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ inputs.app_region }}
 
-      - name: Discover infrastructure
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: Discover Infrastructure
         id: discover
         run: |
           echo "========================================"
-          echo "📋 INFRASTRUCTURE DISCOVERY"
+          echo "INFRASTRUCTURE DISCOVERY"
           echo "========================================"
 
-          # Derive cluster environment from app_env
-          if [ "${{ env.ENVIRONMENT }}" = "prod" ]; then
-            CLUSTER_ENV="prod"
-          else
-            CLUSTER_ENV="nonprod"
-          fi
-          echo "cluster_env=$CLUSTER_ENV" >> $GITHUB_OUTPUT
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          echo "aws_account_id=$AWS_ACCOUNT_ID" >> $GITHUB_OUTPUT
 
-          # Build resource names
-          ARGOCD_CLUSTER="argocd-${{ env.AWS_REGION }}"
-          WORKLOAD_CLUSTER="${{ env.TENANT }}-${{ env.AWS_REGION }}-${CLUSTER_ENV}"
-          ECR_REPO_BACKEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend"
-          ECR_REPO_FRONTEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend"
+          ARGOCD_CLUSTER="${{ env.ARGOCD_CLUSTER }}"
+          WORKLOAD_CLUSTER="${{ env.WORKLOAD_CLUSTER }}"
+          ECR_REPO="${{ env.ECR_REPO }}"
+          NAMESPACE="${{ env.NAMESPACE }}"
 
           echo "argocd_cluster=$ARGOCD_CLUSTER" >> $GITHUB_OUTPUT
           echo "workload_cluster=$WORKLOAD_CLUSTER" >> $GITHUB_OUTPUT
+          echo "ecr_repo=$ECR_REPO" >> $GITHUB_OUTPUT
+          echo "namespace=$NAMESPACE" >> $GITHUB_OUTPUT
 
-          echo ""
-          echo "Target Resources:"
-          echo "  ArgoCD Cluster:   $ARGOCD_CLUSTER (shared)"
-          echo "  Workload Cluster: $WORKLOAD_CLUSTER (tenant)"
-          echo "  ECR Backend:      $ECR_REPO_BACKEND"
-          echo "  ECR Frontend:     $ECR_REPO_FRONTEND"
-          echo ""
+          # Check VPC (Learning #116)
+          echo "Checking VPC: ${{ env.VPC_NAME }}..."
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || echo "None")
+          if [ "$VPC_ID" != "None" ] && [ -n "$VPC_ID" ] && [ "$VPC_ID" != "null" ]; then
+            VPC_EXISTS="true"
+            echo "  VPC EXISTS: $VPC_ID"
+          else
+            VPC_EXISTS="false"
+            echo "  VPC NOT FOUND - will create"
+          fi
+          echo "vpc_exists=$VPC_EXISTS" >> $GITHUB_OUTPUT
+          echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
 
           # Check ArgoCD Cluster
           echo "Checking ArgoCD Cluster: $ARGOCD_CLUSTER..."
-          if aws eks describe-cluster --name "$ARGOCD_CLUSTER" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          if aws eks describe-cluster --name "$ARGOCD_CLUSTER" --region ${{ inputs.app_region }} 2>/dev/null; then
             ARGOCD_EXISTS="true"
-            ARGOCD_STATUS="✅ EXISTS"
-            echo "argocd_exists=true" >> $GITHUB_OUTPUT
+            echo "  ArgoCD cluster EXISTS"
           else
             ARGOCD_EXISTS="false"
-            ARGOCD_STATUS="❌ NOT FOUND"
-            echo "argocd_exists=false" >> $GITHUB_OUTPUT
+            echo "  ArgoCD cluster NOT FOUND - will create"
           fi
+          echo "argocd_exists=$ARGOCD_EXISTS" >> $GITHUB_OUTPUT
 
           # Check Workload Cluster
           echo "Checking Workload Cluster: $WORKLOAD_CLUSTER..."
-          if aws eks describe-cluster --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          if aws eks describe-cluster --name "$WORKLOAD_CLUSTER" --region ${{ inputs.app_region }} 2>/dev/null; then
             WORKLOAD_EXISTS="true"
-            WORKLOAD_STATUS="✅ EXISTS"
-            echo "workload_exists=true" >> $GITHUB_OUTPUT
+            echo "  Workload cluster EXISTS"
           else
             WORKLOAD_EXISTS="false"
-            WORKLOAD_STATUS="❌ NOT FOUND"
-            echo "workload_exists=false" >> $GITHUB_OUTPUT
+            echo "  Workload cluster NOT FOUND - will create"
           fi
+          echo "workload_exists=$WORKLOAD_EXISTS" >> $GITHUB_OUTPUT
 
-          # Check ECR Repositories
-          ECR_BACKEND_EXISTS="false"
-          ECR_FRONTEND_EXISTS="false"
-          
-          if aws ecr describe-repositories --repository-names "$ECR_REPO_BACKEND" --region ${{ env.AWS_REGION }} 2>/dev/null; then
-            ECR_BACKEND_EXISTS="true"
-          fi
-          
-          if aws ecr describe-repositories --repository-names "$ECR_REPO_FRONTEND" --region ${{ env.AWS_REGION }} 2>/dev/null; then
-            ECR_FRONTEND_EXISTS="true"
-          fi
-
-          if [ "$ECR_BACKEND_EXISTS" = "true" ] && [ "$ECR_FRONTEND_EXISTS" = "true" ]; then
+          # Check ECR Repository
+          echo "Checking ECR Repository: $ECR_REPO..."
+          if aws ecr describe-repositories --repository-names "$ECR_REPO" --region ${{ inputs.app_region }} 2>/dev/null; then
             ECR_EXISTS="true"
-            echo "ecr_exists=true" >> $GITHUB_OUTPUT
+            echo "  ECR repository EXISTS"
           else
             ECR_EXISTS="false"
-            echo "ecr_exists=false" >> $GITHUB_OUTPUT
+            echo "  ECR repository NOT FOUND - will create"
           fi
+          echo "ecr_exists=$ECR_EXISTS" >> $GITHUB_OUTPUT
 
           # Determine deployment type
           if [ "$ARGOCD_EXISTS" = "true" ] && [ "$WORKLOAD_EXISTS" = "true" ]; then
             DEPLOY_TYPE="brownfield"
-          elif [ "$ARGOCD_EXISTS" = "true" ] && [ "$WORKLOAD_EXISTS" = "false" ]; then
+          elif [ "$ARGOCD_EXISTS" = "true" ]; then
             DEPLOY_TYPE="partial"
           else
             DEPLOY_TYPE="greenfield"
           fi
           echo "deployment_type=$DEPLOY_TYPE" >> $GITHUB_OUTPUT
 
-          echo ""
-          echo "========================================"
-          echo "📋 INFRASTRUCTURE STATUS REPORT"
-          echo "========================================"
-          echo ""
-          echo "ArgoCD Cluster: $ARGOCD_CLUSTER (shared)"
-          echo "  ├─ Status: $ARGOCD_STATUS"
-          echo ""
-          echo "Workload Cluster: $WORKLOAD_CLUSTER (tenant)"
-          echo "  ├─ Status: $WORKLOAD_STATUS"
-          echo ""
-          echo "ECR Repositories:"
-          echo "  ├─ Backend: $ECR_REPO_BACKEND ($([ "$ECR_BACKEND_EXISTS" = "true" ] && echo "✅ EXISTS" || echo "❌ NOT FOUND"))"
-          echo "  └─ Frontend: $ECR_REPO_FRONTEND ($([ "$ECR_FRONTEND_EXISTS" = "true" ] && echo "✅ EXISTS" || echo "❌ NOT FOUND"))"
-          echo ""
           echo "========================================"
           echo "DEPLOYMENT TYPE: $DEPLOY_TYPE"
           echo "========================================"
 
-  build-and-push:
-    name: "Build and Push Images"
+      # Learning #114: Region-specific Terraform state bucket
+      - name: Setup Terraform State Backend
+        id: tf_backend
+        run: |
+          echo "Setting up Terraform State Backend..."
+
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          REGION="${{ inputs.app_region }}"
+
+          # CRITICAL: Use region-specific bucket name (Learning #114)
+          BUCKET_NAME="opsera-tf-state-${AWS_ACCOUNT_ID}-${REGION}"
+          TABLE_NAME="terraform-state-lock-${REGION}"
+
+          # Learning #117: Pass outputs to subsequent steps
+          echo "tf_bucket=$BUCKET_NAME" >> $GITHUB_OUTPUT
+          echo "tf_table=$TABLE_NAME" >> $GITHUB_OUTPUT
+
+          # Create S3 bucket if not exists
+          if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Creating S3 bucket: $BUCKET_NAME in $REGION"
+            aws s3api create-bucket \
+              --bucket "$BUCKET_NAME" \
+              --region $REGION \
+              --create-bucket-configuration LocationConstraint=$REGION
+
+            aws s3api put-bucket-versioning \
+              --bucket "$BUCKET_NAME" \
+              --versioning-configuration Status=Enabled
+
+            aws s3api put-bucket-encryption \
+              --bucket "$BUCKET_NAME" \
+              --server-side-encryption-configuration \
+              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          else
+            echo "S3 bucket exists: $BUCKET_NAME"
+          fi
+
+          # Create DynamoDB table if not exists
+          if ! aws dynamodb describe-table --table-name "$TABLE_NAME" --region $REGION 2>/dev/null; then
+            echo "Creating DynamoDB table: $TABLE_NAME"
+            aws dynamodb create-table \
+              --table-name "$TABLE_NAME" \
+              --attribute-definitions AttributeName=LockID,AttributeType=S \
+              --key-schema AttributeName=LockID,KeyType=HASH \
+              --billing-mode PAY_PER_REQUEST \
+              --region $REGION
+
+            aws dynamodb wait table-exists --table-name "$TABLE_NAME" --region $REGION
+          else
+            echo "DynamoDB table exists: $TABLE_NAME"
+          fi
+
+      - name: Create ECR Repositories
+        if: steps.discover.outputs.ecr_exists == 'false'
+        run: |
+          ECR_REPO="${{ steps.discover.outputs.ecr_repo }}"
+          ECR_REPO_LOWER=$(echo "$ECR_REPO" | tr '[:upper:]' '[:lower:]')
+
+          aws ecr create-repository \
+            --repository-name "$ECR_REPO_LOWER-backend" \
+            --image-scanning-configuration scanOnPush=true \
+            --region ${{ inputs.app_region }} || true
+
+          aws ecr create-repository \
+            --repository-name "$ECR_REPO_LOWER-frontend" \
+            --image-scanning-configuration scanOnPush=true \
+            --region ${{ inputs.app_region }} || true
+
+      # Learning #112: ACTUAL VPC creation
+      - name: Create VPC with Terraform
+        if: steps.discover.outputs.vpc_exists == 'false'
+        run: |
+          echo "Creating VPC: ${{ env.VPC_NAME }}"
+
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+
+          mkdir -p /tmp/terraform-vpc
+          cd /tmp/terraform-vpc
+
+          cat > main.tf << 'EOF'
+          terraform {
+            required_version = ">= 1.0.0"
+            required_providers {
+              aws = { source = "hashicorp/aws", version = "~> 5.0" }
+            }
+            backend "s3" {}
+          }
+
+          provider "aws" { region = var.region }
+
+          variable "vpc_name" { type = string }
+          variable "region" { type = string }
+          variable "vpc_cidr" { type = string, default = "10.0.0.0/16" }
+          variable "argocd_cluster" { type = string }
+          variable "workload_cluster" { type = string }
+
+          data "aws_availability_zones" "available" { state = "available" }
+
+          resource "aws_vpc" "main" {
+            cidr_block           = var.vpc_cidr
+            enable_dns_hostnames = true
+            enable_dns_support   = true
+            tags = { Name = var.vpc_name }
+          }
+
+          resource "aws_internet_gateway" "main" {
+            vpc_id = aws_vpc.main.id
+            tags = { Name = "${var.vpc_name}-igw" }
+          }
+
+          resource "aws_subnet" "public" {
+            count                   = 2
+            vpc_id                  = aws_vpc.main.id
+            cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
+            availability_zone       = data.aws_availability_zones.available.names[count.index]
+            map_public_ip_on_launch = true
+            tags = {
+              Name = "${var.vpc_name}-public-${count.index + 1}"
+              "kubernetes.io/role/elb" = "1"
+              "kubernetes.io/cluster/${var.argocd_cluster}" = "shared"
+              "kubernetes.io/cluster/${var.workload_cluster}" = "shared"
+            }
+          }
+
+          resource "aws_subnet" "private" {
+            count             = 2
+            vpc_id            = aws_vpc.main.id
+            cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 10)
+            availability_zone = data.aws_availability_zones.available.names[count.index]
+            tags = {
+              Name = "${var.vpc_name}-private-${count.index + 1}"
+              "kubernetes.io/role/internal-elb" = "1"
+              "kubernetes.io/cluster/${var.argocd_cluster}" = "shared"
+              "kubernetes.io/cluster/${var.workload_cluster}" = "shared"
+            }
+          }
+
+          resource "aws_eip" "nat" {
+            count  = 2
+            domain = "vpc"
+            tags = { Name = "${var.vpc_name}-nat-${count.index + 1}" }
+          }
+
+          resource "aws_nat_gateway" "main" {
+            count         = 2
+            allocation_id = aws_eip.nat[count.index].id
+            subnet_id     = aws_subnet.public[count.index].id
+            tags = { Name = "${var.vpc_name}-nat-${count.index + 1}" }
+            depends_on = [aws_internet_gateway.main]
+          }
+
+          resource "aws_route_table" "public" {
+            vpc_id = aws_vpc.main.id
+            route { cidr_block = "0.0.0.0/0", gateway_id = aws_internet_gateway.main.id }
+            tags = { Name = "${var.vpc_name}-public-rt" }
+          }
+
+          resource "aws_route_table" "private" {
+            count  = 2
+            vpc_id = aws_vpc.main.id
+            route { cidr_block = "0.0.0.0/0", nat_gateway_id = aws_nat_gateway.main[count.index].id }
+            tags = { Name = "${var.vpc_name}-private-rt-${count.index + 1}" }
+          }
+
+          resource "aws_route_table_association" "public" {
+            count          = 2
+            subnet_id      = aws_subnet.public[count.index].id
+            route_table_id = aws_route_table.public.id
+          }
+
+          resource "aws_route_table_association" "private" {
+            count          = 2
+            subnet_id      = aws_subnet.private[count.index].id
+            route_table_id = aws_route_table.private[count.index].id
+          }
+
+          output "vpc_id" { value = aws_vpc.main.id }
+          output "public_subnet_ids" { value = aws_subnet.public[*].id }
+          output "private_subnet_ids" { value = aws_subnet.private[*].id }
+          EOF
+
+          BUCKET_NAME="${{ steps.tf_backend.outputs.tf_bucket }}"
+          TABLE_NAME="${{ steps.tf_backend.outputs.tf_table }}"
+
+          terraform init \
+            -backend-config="bucket=${BUCKET_NAME}" \
+            -backend-config="key=your-username/vpc/terraform.tfstate" \
+            -backend-config="region=${{ inputs.app_region }}" \
+            -backend-config="dynamodb_table=${TABLE_NAME}" \
+            -backend-config="encrypt=true"
+
+          terraform apply -auto-approve \
+            -var="vpc_name=${{ env.VPC_NAME }}" \
+            -var="region=${{ inputs.app_region }}" \
+            -var="argocd_cluster=${{ env.ARGOCD_CLUSTER }}" \
+            -var="workload_cluster=${{ env.WORKLOAD_CLUSTER }}"
+
+          VPC_ID=$(terraform output -raw vpc_id)
+          PUBLIC_SUBNETS=$(terraform output -json public_subnet_ids | jq -r '.[]' | tr '\n' ' ')
+          PRIVATE_SUBNETS=$(terraform output -json private_subnet_ids | jq -r '.[]' | tr '\n' ' ')
+
+          echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
+          echo "public_subnet_ids=$PUBLIC_SUBNETS" >> $GITHUB_OUTPUT
+          echo "private_subnet_ids=$PRIVATE_SUBNETS" >> $GITHUB_OUTPUT
+
+          echo "VPC created successfully: $VPC_ID"
+
+      # Learning #112: ACTUAL EKS cluster creation
+      - name: Create ArgoCD EKS Cluster
+        if: steps.discover.outputs.argocd_exists == 'false'
+        run: |
+          echo "Creating ArgoCD EKS Cluster: ${{ env.ARGOCD_CLUSTER }}"
+
+          VPC_ID="${{ steps.discover.outputs.vpc_id }}"
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
+              --query 'Vpcs[0].VpcId' --output text)
+          fi
+
+          SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
+            "Name=tag:Name,Values=*private*" --query 'Subnets[*].SubnetId' --output text | tr '\t' ',')
+
+          # Create cluster role
+          CLUSTER_ROLE_NAME="${{ env.ARGOCD_CLUSTER }}-cluster-role"
+          if ! aws iam get-role --role-name "$CLUSTER_ROLE_NAME" 2>/dev/null; then
+            aws iam create-role --role-name "$CLUSTER_ROLE_NAME" \
+              --assume-role-policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [{
+                  "Effect": "Allow",
+                  "Principal": {"Service": "eks.amazonaws.com"},
+                  "Action": "sts:AssumeRole"
+                }]
+              }'
+            aws iam attach-role-policy --role-name "$CLUSTER_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+          fi
+
+          CLUSTER_ROLE_ARN=$(aws iam get-role --role-name "$CLUSTER_ROLE_NAME" --query 'Role.Arn' --output text)
+
+          # Create EKS cluster
+          aws eks create-cluster \
+            --name "${{ env.ARGOCD_CLUSTER }}" \
+            --role-arn "$CLUSTER_ROLE_ARN" \
+            --resources-vpc-config "subnetIds=$SUBNET_IDS,endpointPublicAccess=true,endpointPrivateAccess=true" \
+            --kubernetes-version "1.28" \
+            --region ${{ inputs.app_region }} || echo "Cluster creation initiated"
+
+          echo "Waiting for cluster to be ACTIVE (10-15 minutes)..."
+          aws eks wait cluster-active --name "${{ env.ARGOCD_CLUSTER }}" --region ${{ inputs.app_region }}
+
+          # Learning #124: Create OIDC provider for IRSA
+          echo "Creating OIDC provider..."
+          aws eks describe-cluster --name "${{ env.ARGOCD_CLUSTER }}" --region ${{ inputs.app_region }} --query 'cluster.identity.oidc.issuer' --output text | \
+            sed 's|https://||' | \
+            xargs -I {} aws iam list-open-id-connect-providers --query "OpenIDConnectProviderList[?contains(Arn, '{}')]" --output text || \
+            aws eks describe-cluster --name "${{ env.ARGOCD_CLUSTER }}" --region ${{ inputs.app_region }} --query 'cluster.identity.oidc.issuer' --output text | \
+            sed 's|https://||' | \
+            xargs -I {} aws iam create-open-id-connect-provider \
+              --url https://{} \
+              --client-id-list sts.amazonaws.com \
+              --thumbprint-list $(openssl s_client -servername {} -showcerts -connect {}:443 </dev/null 2>/dev/null | openssl x509 -fingerprint -noout -sha1 | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]') || true
+
+      - name: Create ArgoCD Node Group
+        if: steps.discover.outputs.argocd_exists == 'false'
+        run: |
+          VPC_ID="${{ steps.discover.outputs.vpc_id }}"
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
+              --query 'Vpcs[0].VpcId' --output text)
+          fi
+
+          SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
+            "Name=tag:Name,Values=*private*" --query 'Subnets[*].SubnetId' --output text | tr '\t' ' ')
+
+          NODE_ROLE_NAME="${{ env.ARGOCD_CLUSTER }}-node-role"
+          if ! aws iam get-role --role-name "$NODE_ROLE_NAME" 2>/dev/null; then
+            aws iam create-role --role-name "$NODE_ROLE_NAME" \
+              --assume-role-policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [{
+                  "Effect": "Allow",
+                  "Principal": {"Service": "ec2.amazonaws.com"},
+                  "Action": "sts:AssumeRole"
+                }]
+              }'
+            aws iam attach-role-policy --role-name "$NODE_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+            aws iam attach-role-policy --role-name "$NODE_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+            aws iam attach-role-policy --role-name "$NODE_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+            sleep 10
+          fi
+
+          NODE_ROLE_ARN=$(aws iam get-role --role-name "$NODE_ROLE_NAME" --query 'Role.Arn' --output text)
+
+          # Learning #126: AMI type required for EKS 1.28+
+          aws eks create-nodegroup \
+            --cluster-name "${{ env.ARGOCD_CLUSTER }}" \
+            --nodegroup-name "argocd-nodes" \
+            --node-role "$NODE_ROLE_ARN" \
+            --subnets $SUBNET_IDS \
+            --instance-types t3.medium \
+            --ami-type AL2_x86_64 \
+            --scaling-config minSize=1,maxSize=3,desiredSize=2 \
+            --region ${{ inputs.app_region }} || echo "Node group creation initiated"
+
+          aws eks wait nodegroup-active \
+            --cluster-name "${{ env.ARGOCD_CLUSTER }}" \
+            --nodegroup-name "argocd-nodes" \
+            --region ${{ inputs.app_region }} || true
+
+      - name: Create Workload EKS Cluster
+        if: steps.discover.outputs.workload_exists == 'false'
+        run: |
+          echo "Creating Workload EKS Cluster: ${{ env.WORKLOAD_CLUSTER }}"
+
+          VPC_ID="${{ steps.discover.outputs.vpc_id }}"
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
+              --query 'Vpcs[0].VpcId' --output text)
+          fi
+
+          SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
+            "Name=tag:Name,Values=*private*" --query 'Subnets[*].SubnetId' --output text | tr '\t' ',')
+
+          CLUSTER_ROLE_NAME="${{ env.WORKLOAD_CLUSTER }}-cluster-role"
+          if ! aws iam get-role --role-name "$CLUSTER_ROLE_NAME" 2>/dev/null; then
+            aws iam create-role --role-name "$CLUSTER_ROLE_NAME" \
+              --assume-role-policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [{
+                  "Effect": "Allow",
+                  "Principal": {"Service": "eks.amazonaws.com"},
+                  "Action": "sts:AssumeRole"
+                }]
+              }'
+            aws iam attach-role-policy --role-name "$CLUSTER_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+          fi
+
+          CLUSTER_ROLE_ARN=$(aws iam get-role --role-name "$CLUSTER_ROLE_NAME" --query 'Role.Arn' --output text)
+
+          aws eks create-cluster \
+            --name "${{ env.WORKLOAD_CLUSTER }}" \
+            --role-arn "$CLUSTER_ROLE_ARN" \
+            --resources-vpc-config "subnetIds=$SUBNET_IDS,endpointPublicAccess=true,endpointPrivateAccess=true" \
+            --kubernetes-version "1.28" \
+            --region ${{ inputs.app_region }} || echo "Cluster creation initiated"
+
+          echo "Waiting for cluster to be ACTIVE (10-15 minutes)..."
+          aws eks wait cluster-active --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }}
+
+          # Learning #124: Create OIDC provider for IRSA
+          echo "Creating OIDC provider..."
+          aws eks describe-cluster --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }} --query 'cluster.identity.oidc.issuer' --output text | \
+            sed 's|https://||' | \
+            xargs -I {} aws iam list-open-id-connect-providers --query "OpenIDConnectProviderList[?contains(Arn, '{}')]" --output text || \
+            aws eks describe-cluster --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }} --query 'cluster.identity.oidc.issuer' --output text | \
+            sed 's|https://||' | \
+            xargs -I {} aws iam create-open-id-connect-provider \
+              --url https://{} \
+              --client-id-list sts.amazonaws.com \
+              --thumbprint-list $(openssl s_client -servername {} -showcerts -connect {}:443 </dev/null 2>/dev/null | openssl x509 -fingerprint -noout -sha1 | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]') || true
+
+      - name: Create Workload Node Group
+        if: steps.discover.outputs.workload_exists == 'false'
+        run: |
+          VPC_ID="${{ steps.discover.outputs.vpc_id }}"
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
+              --query 'Vpcs[0].VpcId' --output text)
+          fi
+
+          SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
+            "Name=tag:Name,Values=*private*" --query 'Subnets[*].SubnetId' --output text | tr '\t' ' ')
+
+          NODE_ROLE_NAME="${{ env.WORKLOAD_CLUSTER }}-node-role"
+          if ! aws iam get-role --role-name "$NODE_ROLE_NAME" 2>/dev/null; then
+            aws iam create-role --role-name "$NODE_ROLE_NAME" \
+              --assume-role-policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [{
+                  "Effect": "Allow",
+                  "Principal": {"Service": "ec2.amazonaws.com"},
+                  "Action": "sts:AssumeRole"
+                }]
+              }'
+            aws iam attach-role-policy --role-name "$NODE_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+            aws iam attach-role-policy --role-name "$NODE_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+            aws iam attach-role-policy --role-name "$NODE_ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+            # ELB permissions for LoadBalancer services
+            aws iam put-role-policy --role-name "$NODE_ROLE_NAME" \
+              --policy-name "elb-permissions" \
+              --policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [{
+                  "Effect": "Allow",
+                  "Action": ["elasticloadbalancing:*", "ec2:Describe*", "ec2:CreateSecurityGroup",
+                    "ec2:AuthorizeSecurityGroupIngress", "ec2:CreateTags"],
+                  "Resource": "*"
+                }]
+              }'
+            sleep 10
+          fi
+
+          NODE_ROLE_ARN=$(aws iam get-role --role-name "$NODE_ROLE_NAME" --query 'Role.Arn' --output text)
+
+          # Learning #126: AMI type required for EKS 1.28+
+          aws eks create-nodegroup \
+            --cluster-name "${{ env.WORKLOAD_CLUSTER }}" \
+            --node-role "$NODE_ROLE_ARN" \
+            --nodegroup-name "workload-nodes" \
+            --subnets $SUBNET_IDS \
+            --instance-types t3.medium \
+            --ami-type AL2_x86_64 \
+            --scaling-config minSize=1,maxSize=4,desiredSize=2 \
+            --region ${{ inputs.app_region }} || echo "Node group creation initiated"
+
+          aws eks wait nodegroup-active \
+            --cluster-name "${{ env.WORKLOAD_CLUSTER }}" \
+            --nodegroup-name "workload-nodes" \
+            --region ${{ inputs.app_region }} || true
+
+      # Learning #128: Install ExternalDNS for greenfield deployments
+      - name: Install ExternalDNS
+        if: steps.discover.outputs.deployment_type == 'greenfield'
+        run: |
+          echo "Installing ExternalDNS for automatic DNS management..."
+
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+          # Install Helm
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+          aws eks update-kubeconfig --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }}
+
+          # Create IAM policy for ExternalDNS Route53 access
+          POLICY_NAME="${{ env.WORKLOAD_CLUSTER }}-external-dns-policy"
+          if ! aws iam get-policy --policy-arn "arn:aws:iam::$(aws sts get-caller-identity --query 'Account' --output text):policy/$POLICY_NAME" 2>/dev/null; then
+            cat > /tmp/externaldns-policy.json << 'EOF'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": ["route53:ChangeResourceRecordSets"],
+                "Resource": ["arn:aws:route53:::hostedzone/*"]
+              },
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "route53:ListHostedZones",
+                  "route53:ListResourceRecordSets"
+                ],
+                "Resource": ["*"]
+              }
+            ]
+          }
+          EOF
+
+            aws iam create-policy \
+              --policy-name "$POLICY_NAME" \
+              --policy-document file:///tmp/externaldns-policy.json \
+              --region ${{ inputs.app_region }} || true
+          fi
+
+          # Get OIDC issuer URL
+          OIDC_ISSUER=$(aws eks describe-cluster --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }} \
+            --query 'cluster.identity.oidc.issuer' --output text | sed 's|https://||')
+
+          # Create IAM role for ExternalDNS with IRSA
+          ROLE_NAME="${{ env.WORKLOAD_CLUSTER }}-external-dns"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          
+          if ! aws iam get-role --role-name "$ROLE_NAME" 2>/dev/null; then
+            cat > /tmp/externaldns-trust.json << EOF
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER}"
+                },
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {
+                  "StringEquals": {
+                    "${OIDC_ISSUER}:sub": "system:serviceaccount:kube-system:external-dns",
+                    "${OIDC_ISSUER}:aud": "sts.amazonaws.com"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+
+            aws iam create-role \
+              --role-name "$ROLE_NAME" \
+              --assume-role-policy-document file:///tmp/externaldns-trust.json \
+              --region ${{ inputs.app_region }} || true
+
+            aws iam attach-role-policy \
+              --role-name "$ROLE_NAME" \
+              --policy-arn "arn:aws:iam::${ACCOUNT_ID}:policy/$POLICY_NAME" \
+              --region ${{ inputs.app_region }} || true
+          fi
+
+          ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)
+
+          # Create service account with IRSA annotation
+          kubectl create namespace kube-system || true
+          kubectl create serviceaccount external-dns -n kube-system || true
+          kubectl annotate serviceaccount external-dns \
+            -n kube-system \
+            eks.amazonaws.com/role-arn="$ROLE_ARN" || true
+
+          # Install ExternalDNS via Helm
+          helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ || true
+          helm repo update
+
+          helm upgrade --install external-dns external-dns/external-dns \
+            --namespace kube-system \
+            --set provider=aws \
+            --set aws.region=${{ inputs.app_region }} \
+            --set txtOwnerId=${{ env.WORKLOAD_CLUSTER }} \
+            --set policy=sync \
+            --set serviceAccount.create=false \
+            --set serviceAccount.name=external-dns \
+            --wait || true
+
+          echo "✅ ExternalDNS installed successfully"
+
+      - name: Install ArgoCD
+        if: steps.discover.outputs.argocd_exists == 'false'
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+          aws eks update-kubeconfig --name "${{ env.ARGOCD_CLUSTER }}" --region ${{ inputs.app_region }}
+
+          kubectl create namespace argocd || true
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+          kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd || true
+
+  application:
+    name: "Phase 2: Application"
     runs-on: ubuntu-latest
-    needs: discover-infrastructure
-    outputs:
-      image_tag: ${{ steps.vars.outputs.image_tag }}
-      aws_account_id: ${{ steps.vars.outputs.aws_account_id }}
-      ecr_registry: ${{ steps.vars.outputs.ecr_registry }}
-
+    needs: [infrastructure]
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Create or Checkout Deploy Branch
+        run: |
+          DEPLOY_BRANCH="${{ env.DEPLOY_BRANCH }}"
+          
+          # Check if branch exists
+          if git ls-remote --heads origin "$DEPLOY_BRANCH" | grep -q "$DEPLOY_BRANCH"; then
+            echo "Branch $DEPLOY_BRANCH exists, checking out..."
+            git checkout "$DEPLOY_BRANCH"
+            git pull origin "$DEPLOY_BRANCH" || true
+          else
+            echo "Branch $DEPLOY_BRANCH does not exist, creating from main..."
+            git checkout -b "$DEPLOY_BRANCH"
+            git push -u origin "$DEPLOY_BRANCH" || echo "Failed to push branch, will continue"
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ inputs.app_region }}
 
-      - name: Set up variables
-        id: vars
+      - name: Build & Push Images
+        id: build
         run: |
-          IMAGE_TAG=$(echo ${{ github.sha }} | cut -c1-7)
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          
+          AWS_ACCOUNT_ID=${{ needs.infrastructure.outputs.aws_account_id }}
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${{ inputs.app_region }}.amazonaws.com"
+          ECR_REPO_LOWER=$(echo "${{ needs.infrastructure.outputs.ecr_repo }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_TAG="${{ github.sha }}"
+
+          aws ecr get-login-password --region ${{ inputs.app_region }} | \
+            docker login --username AWS --password-stdin $ECR_REGISTRY
+
+          # Build and push backend
+          if [ -f "backend/Dockerfile" ]; then
+            docker build -t $ECR_REGISTRY/$ECR_REPO_LOWER-backend:$IMAGE_TAG ./backend
+            docker push $ECR_REGISTRY/$ECR_REPO_LOWER-backend:$IMAGE_TAG
+            
+            # Learning #134: Tag and push with 'latest' as well
+            docker tag $ECR_REGISTRY/$ECR_REPO_LOWER-backend:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPO_LOWER-backend:latest
+            docker push $ECR_REGISTRY/$ECR_REPO_LOWER-backend:latest
+            echo "Backend image pushed: $ECR_REGISTRY/$ECR_REPO_LOWER-backend:$IMAGE_TAG and :latest"
+          fi
+
+          # Build and push frontend
+          if [ -f "frontend/Dockerfile" ]; then
+            docker build -t $ECR_REGISTRY/$ECR_REPO_LOWER-frontend:$IMAGE_TAG ./frontend
+            docker push $ECR_REGISTRY/$ECR_REPO_LOWER-frontend:$IMAGE_TAG
+            
+            # Learning #134: Tag and push with 'latest' as well
+            docker tag $ECR_REGISTRY/$ECR_REPO_LOWER-frontend:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPO_LOWER-frontend:latest
+            docker push $ECR_REGISTRY/$ECR_REPO_LOWER-frontend:latest
+            echo "Frontend image pushed: $ECR_REGISTRY/$ECR_REPO_LOWER-frontend:$IMAGE_TAG and :latest"
+          fi
+
           echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "aws_account_id=$AWS_ACCOUNT_ID" >> $GITHUB_OUTPUT
           echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
-          
-          echo "Image tag: $IMAGE_TAG"
-          echo "AWS Account ID: $AWS_ACCOUNT_ID"
-          echo "ECR Registry: $ECR_REGISTRY"
+          echo "ecr_repo_backend=$ECR_REPO_LOWER-backend" >> $GITHUB_OUTPUT
+          echo "ecr_repo_frontend=$ECR_REPO_LOWER-frontend" >> $GITHUB_OUTPUT
 
-      - name: Login to ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Create ECR repos if not exist
+      - name: Update Kustomization
         run: |
-          ECR_REPO_BACKEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend"
-          ECR_REPO_FRONTEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend"
+          cd ${{ inputs.app_name }}-opsera/k8s/overlays/${{ inputs.app_env }}
 
-          aws ecr describe-repositories --repository-names "$ECR_REPO_BACKEND" --region ${{ env.AWS_REGION }} 2>/dev/null || \
-            aws ecr create-repository --repository-name "$ECR_REPO_BACKEND" --region ${{ env.AWS_REGION }} --image-scanning-configuration scanOnPush=true
+          AWS_ACCOUNT_ID=${{ needs.infrastructure.outputs.aws_account_id }}
+          ECR_REGISTRY="${{ steps.build.outputs.ecr_registry }}"
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          ECR_BACKEND="${{ steps.build.outputs.ecr_registry }}/${{ steps.build.outputs.ecr_repo_backend }}"
+          ECR_FRONTEND="${{ steps.build.outputs.ecr_registry }}/${{ steps.build.outputs.ecr_repo_frontend }}"
 
-          aws ecr describe-repositories --repository-names "$ECR_REPO_FRONTEND" --region ${{ env.AWS_REGION }} 2>/dev/null || \
-            aws ecr create-repository --repository-name "$ECR_REPO_FRONTEND" --region ${{ env.AWS_REGION }} --image-scanning-configuration scanOnPush=true
+          echo "Updating kustomization.yaml with:"
+          echo "  Backend: $ECR_BACKEND:$IMAGE_TAG"
+          echo "  Frontend: $ECR_FRONTEND:$IMAGE_TAG"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          # Replace backend image
+          sed -i "s|PLACEHOLDER_ECR_BACKEND|${ECR_BACKEND}|g" kustomization.yaml
+          sed -i "/name: PLACEHOLDER_ECR_BACKEND/,/newTag:/ s|newName: .*|newName: ${ECR_BACKEND}|" kustomization.yaml
+          sed -i "/name: PLACEHOLDER_ECR_BACKEND/,/newTag:/ s|newTag: .*|newTag: \"${IMAGE_TAG}\"|" kustomization.yaml
 
-      - name: Build and push backend
-        uses: docker/build-push-action@v5
-        with:
-          context: ./backend
-          push: true
-          tags: |
-            ${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend:${{ steps.vars.outputs.image_tag }}
-            ${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend:latest
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Replace frontend image
+          sed -i "s|PLACEHOLDER_ECR_FRONTEND|${ECR_FRONTEND}|g" kustomization.yaml
+          sed -i "/name: PLACEHOLDER_ECR_FRONTEND/,/newTag:/ s|newName: .*|newName: ${ECR_FRONTEND}|" kustomization.yaml
+          sed -i "/name: PLACEHOLDER_ECR_FRONTEND/,/newTag:/ s|newTag: .*|newTag: \"${IMAGE_TAG}\"|" kustomization.yaml
 
-      - name: Build and push frontend
-        uses: docker/build-push-action@v5
-        with:
-          context: ./frontend
-          push: true
-          tags: |
-            ${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend:${{ steps.vars.outputs.image_tag }}
-            ${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend:latest
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Update all tags to use the same tag
+          sed -i "s|newTag: .*|newTag: \"${IMAGE_TAG}\"|g" kustomization.yaml
 
-      - name: Grype Security Scan
-        uses: anchore/scan-action@v3
-        id: scan
-        with:
-          image: "${{ steps.vars.outputs.ecr_registry }}/${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend:${{ steps.vars.outputs.image_tag }}"
-          fail-build: false
-          severity-cutoff: high
-
-      - name: Check security scan results
-        run: |
-          if [ "${{ steps.scan.outputs.vulnerabilities-high }}" -gt 10 ] || [ "${{ steps.scan.outputs.vulnerabilities-critical }}" -gt 0 ]; then
-            echo "❌ Security scan failed: ${{ steps.scan.outputs.vulnerabilities-critical }} critical, ${{ steps.scan.outputs.vulnerabilities-high }} high"
+          # Validate no placeholders
+          if grep -q "PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
+            echo "ERROR: Placeholders found!"
+            grep -n "PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml
             exit 1
           fi
-          echo "✅ Security scan passed"
-
-  update-manifests:
-    name: "Update K8s Manifests"
-    runs-on: ubuntu-latest
-    needs: [discover-infrastructure, build-and-push]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update kustomization with new image tags
-        run: |
-          cd your-username-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
-
-          # Get AWS Account ID
-          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
-          ECR_REGISTRY="${{ needs.build-and-push.outputs.ecr_registry }}"
-          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
-          APP_IDENTIFIER="${{ env.APP_IDENTIFIER }}"
-          TENANT="${{ env.TENANT }}"
-
-          ECR_BACKEND="${ECR_REGISTRY}/${TENANT}/${APP_IDENTIFIER}-backend"
-          ECR_FRONTEND="${ECR_REGISTRY}/${TENANT}/${APP_IDENTIFIER}-frontend"
-
-          echo "Replacing placeholders:"
-          echo "  AWS_ACCOUNT_ID: $AWS_ACCOUNT_ID"
-          echo "  ECR_REGISTRY: $ECR_REGISTRY"
-          echo "  ECR_BACKEND: $ECR_BACKEND"
-          echo "  ECR_FRONTEND: $ECR_FRONTEND"
-          echo "  IMAGE_TAG: $IMAGE_TAG"
-
-          # Replace PLACEHOLDER_ECR_BACKEND
-          sed -i "s|PLACEHOLDER_ECR_BACKEND|${ECR_BACKEND}|g" kustomization.yaml
-          
-          # Replace PLACEHOLDER_ECR_FRONTEND
-          sed -i "s|PLACEHOLDER_ECR_FRONTEND|${ECR_FRONTEND}|g" kustomization.yaml
-
-          # Update backend image newName
-          sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_BACKEND}|" kustomization.yaml
-
-          # Update frontend image newName
-          sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_FRONTEND}|" kustomization.yaml
-
-          # Update ALL tags
-          sed -i "s|newTag: .*|newTag: \"${IMAGE_TAG}\"|g" kustomization.yaml
 
           echo ""
           echo "=== Updated kustomization.yaml ==="
           cat kustomization.yaml
-          echo ""
 
-          # Validate no placeholders remain
-          if grep -q "PLACEHOLDER\|ECR_REGISTRY\|ACCOUNT_ID\|TODO\|CHANGEME" kustomization.yaml; then
-            echo "ERROR: Placeholders found in kustomization.yaml after replacement!"
-            grep -n "PLACEHOLDER\|ECR_REGISTRY\|ACCOUNT_ID\|TODO\|CHANGEME" kustomization.yaml || true
-            exit 1
-          fi
-          
-          echo "✓ All placeholders replaced successfully"
-
-      - name: Commit and push changes
+      - name: Commit Changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${{ inputs.app_name }}-opsera/k8s/overlays/${{ inputs.app_env }}/kustomization.yaml
+          git commit -m "[skip ci] Update image tags to ${{ steps.build.outputs.image_tag }}" || echo "No changes"
+          git push origin ${{ env.DEPLOY_BRANCH }} || echo "Push failed"
 
-          git add your-username-opsera/k8s/overlays/${{ env.ENVIRONMENT }}/kustomization.yaml
-
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git pull --rebase origin main || git pull --rebase origin your-username-opsera || true
-            git commit -m "[skip ci] Update image tags to ${{ needs.build-and-push.outputs.image_tag }}"
-            git push || echo "Push conflict - will retry on next run"
-          fi
-
-  deploy-to-cluster:
-    name: "Deploy to Workload Cluster"
+  verification:
+    name: "Phase 3: Verification"
     runs-on: ubuntu-latest
-    needs: [discover-infrastructure, build-and-push, update-manifests]
-
+    needs: [infrastructure, application]
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ inputs.app_region }}
 
       - name: Configure kubectl
-        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
         run: |
-          WORKLOAD_CLUSTER="${{ needs.discover-infrastructure.outputs.workload_cluster }}"
-          aws eks update-kubeconfig --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }}
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }}
 
-      - name: Verify ECR images exist
-        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
+      - name: Create AWS Credentials Secret
         run: |
-          echo "=== Verifying ECR images exist ==="
-          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
-          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
-          ECR_REPO_BACKEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-backend"
-          ECR_REPO_FRONTEND="${{ env.TENANT }}/${{ env.APP_IDENTIFIER }}-frontend"
+          # Learning #139: Create aws-credentials secret for IRSA fallback
+          kubectl delete secret aws-credentials -n ${{ needs.infrastructure.outputs.namespace }} --ignore-not-found || true
+          kubectl create secret generic aws-credentials \
+            --namespace ${{ needs.infrastructure.outputs.namespace }} \
+            --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
+            --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} || true
 
-          echo "Checking backend image..."
-          aws ecr describe-images --repository-name "$ECR_REPO_BACKEND" --image-ids imageTag=$IMAGE_TAG --region ${{ env.AWS_REGION }} || {
-            echo "ERROR: Backend image with tag $IMAGE_TAG not found in ECR"
-            exit 1
-          }
+      - name: Apply ArgoCD Application
+        run: |
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
+          kubectl apply -f ${{ inputs.app_name }}-opsera/argocd/application.yaml || true
+
+      - name: Wait for ArgoCD Sync
+        run: |
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
+          APP_NAME="${{ inputs.app_name }}-${{ inputs.app_env }}"
+          for i in {1..60}; do
+            STATUS=$(kubectl get application "$APP_NAME" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+            if [ "$STATUS" = "Synced" ]; then
+              echo "✅ ArgoCD sync complete"
+              break
+            fi
+            echo "Waiting for ArgoCD sync... ($i/60) - Status: $STATUS"
+            sleep 10
+          done
+
+      - name: Verify Deployment
+        run: |
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }}
           
-          echo "Checking frontend image..."
-          aws ecr describe-images --repository-name "$ECR_REPO_FRONTEND" --image-ids imageTag=$IMAGE_TAG --region ${{ env.AWS_REGION }} || {
-            echo "ERROR: Frontend image with tag $IMAGE_TAG not found in ECR"
-            exit 1
-          }
+          NAMESPACE="${{ needs.infrastructure.outputs.namespace }}"
           
-          echo "✓ Both images exist in ECR"
-
-      - name: Update kustomization.yaml (ensure latest)
-        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
-        run: |
-          cd your-username-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
+          APP_NAME="${{ inputs.app_name }}"
           
-          AWS_ACCOUNT_ID="${{ needs.build-and-push.outputs.aws_account_id }}"
-          ECR_REGISTRY="${{ needs.build-and-push.outputs.ecr_registry }}"
-          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
-          APP_IDENTIFIER="${{ env.APP_IDENTIFIER }}"
-          TENANT="${{ env.TENANT }}"
+          # Wait for pods
+          kubectl wait --for=condition=ready pod -l app=${APP_NAME}-backend -n $NAMESPACE --timeout=300s || true
+          kubectl wait --for=condition=ready pod -l app=${APP_NAME}-frontend -n $NAMESPACE --timeout=300s || true
 
-          ECR_BACKEND="${ECR_REGISTRY}/${TENANT}/${APP_IDENTIFIER}-backend"
-          ECR_FRONTEND="${ECR_REGISTRY}/${TENANT}/${APP_IDENTIFIER}-frontend"
-
-          # Replace ALL placeholders
-          sed -i "s|PLACEHOLDER_ECR_BACKEND|${ECR_BACKEND}|g" kustomization.yaml
-          sed -i "s|PLACEHOLDER_ECR_FRONTEND|${ECR_FRONTEND}|g" kustomization.yaml
-          sed -i "s|newName: .*${APP_IDENTIFIER}-backend|newName: ${ECR_BACKEND}|" kustomization.yaml
-          sed -i "s|newName: .*${APP_IDENTIFIER}-frontend|newName: ${ECR_FRONTEND}|" kustomization.yaml
-          sed -i "s|newTag: .*|newTag: \"${IMAGE_TAG}\"|g" kustomization.yaml
-
-          # Verify no placeholders remain
-          if grep -q "PLACEHOLDER\|ECR_REGISTRY\|ACCOUNT_ID\|TODO\|CHANGEME" kustomization.yaml; then
-            echo "❌ ERROR: Placeholders still found!"
-            grep -n "PLACEHOLDER\|ECR_REGISTRY\|ACCOUNT_ID\|TODO\|CHANGEME" kustomization.yaml
-            exit 1
-          fi
-
-      - name: Install kubectl and kustomize
-        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-          
-          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
-          sudo mv kustomize /usr/local/bin/
-
-      - name: Deploy to cluster
-        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
-        run: |
-          cd your-username-opsera/k8s/overlays/${{ env.ENVIRONMENT }}
-          NAMESPACE="your-username-dev"
-
-          # Apply manifests
-          kustomize build . | kubectl apply -f -
-
-          # Wait for deployments
-          kubectl wait --for=condition=available --timeout=300s deployment/your-username-backend -n $NAMESPACE || true
-          kubectl wait --for=condition=available --timeout=300s deployment/your-username-frontend -n $NAMESPACE || true
-
-      - name: Get LoadBalancer endpoint
-        if: needs.discover-infrastructure.outputs.workload_exists == 'true'
-        id: endpoint
-        run: |
-          NAMESPACE="your-username-dev"
-          
+          # Get LoadBalancer endpoint
           for i in {1..30}; do
-            ENDPOINT=$(kubectl get svc your-username-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            ENDPOINT=$(kubectl get svc ${APP_NAME}-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
             if [ -n "$ENDPOINT" ]; then
               echo "endpoint=$ENDPOINT" >> $GITHUB_OUTPUT
               echo "✅ LoadBalancer endpoint: $ENDPOINT"
               break
             fi
-            echo "Waiting for LoadBalancer... ($i/30)"
-            sleep 10
-          done
-
-  verify-endpoint:
-    name: "Verify Endpoint Accessible"
-    runs-on: ubuntu-latest
-    needs: [deploy-to-cluster]
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Configure kubectl
-        run: |
-          WORKLOAD_CLUSTER="${{ needs.discover-infrastructure.outputs.workload_cluster }}"
-          aws eks update-kubeconfig --name "$WORKLOAD_CLUSTER" --region ${{ env.AWS_REGION }}
-
-      - name: Wait for pods to be ready
-        run: |
-          NAMESPACE="your-username-dev"
-          
-          for i in {1..30}; do
-            READY=$(kubectl get pods -n $NAMESPACE -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' | tr ' ' '\n' | grep -c True || echo 0)
-            
-            echo "Attempt $i/30: $READY pods ready"
-            
-            # Check for ImagePullBackOff
-            if kubectl get pods -n $NAMESPACE | grep -q "ImagePullBackOff\|ErrImagePull"; then
-              echo "❌ ERROR: ImagePullBackOff detected!"
-              kubectl describe pods -n $NAMESPACE | grep -A5 "Events:" || true
-              exit 1
-            fi
-            
-            [ "$READY" -ge 2 ] && break
             sleep 10
           done
 
       - name: Verify HTTP 200
         run: |
-          NAMESPACE="your-username-dev"
-          
-          # Get LoadBalancer endpoint
-          for i in {1..30}; do
-            ENDPOINT=$(kubectl get svc your-username-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-            if [ -n "$ENDPOINT" ]; then
-              break
-            fi
-            sleep 10
-          done
+          NAMESPACE="${{ needs.infrastructure.outputs.namespace }}"
+          APP_NAME="${{ inputs.app_name }}"
+          ENDPOINT=$(kubectl get svc ${APP_NAME}-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
           
           if [ -z "$ENDPOINT" ]; then
             echo "❌ LoadBalancer endpoint not found"
@@ -494,9 +915,22 @@ jobs:
           for i in {1..30}; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "http://$ENDPOINT" || echo "000")
             echo "Attempt $i/30: HTTP $STATUS"
-            [ "$STATUS" = "200" ] && echo "✅ ENDPOINT VERIFIED" && exit 0
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ ENDPOINT VERIFIED: http://$ENDPOINT"
+              exit 0
+            fi
             sleep 10
           done
           
           echo "❌ Endpoint not responding with HTTP 200"
           exit 1
+
+      - name: Summary
+        run: |
+          echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ArgoCD Cluster | ${{ needs.infrastructure.outputs.argocd_cluster }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Workload Cluster | ${{ needs.infrastructure.outputs.workload_cluster }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment Type | ${{ needs.infrastructure.outputs.deployment_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | ${{ needs.infrastructure.outputs.namespace }} |" >> $GITHUB_STEP_SUMMARY

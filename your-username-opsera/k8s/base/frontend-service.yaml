@@ -5,6 +5,15 @@ metadata:
   namespace: your-username-dev
   labels:
     app: your-username-frontend
+  annotations:
+    # Learning #128: ExternalDNS will create DNS record automatically
+    external-dns.alpha.kubernetes.io/hostname: your-username-dev.agents.opsera-labs.com
+    # Learning #101: NLB internet-facing annotation
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    # Learning #135: HTTPS with ACM Certificate (will be set when certificate is available)
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: tcp
 spec:
   type: LoadBalancer
   ports:
@@ -12,5 +21,9 @@ spec:
     targetPort: 8080
     protocol: TCP
     name: http
+  - port: 443
+    targetPort: 8080
+    protocol: TCP
+    name: https
   selector:
     app: your-username-frontend

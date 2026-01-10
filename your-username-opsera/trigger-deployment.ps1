@@ -1,81 +1,63 @@
-# PowerShell script to help trigger deployment workflows
-# This script provides instructions and can check prerequisites
+# PowerShell script to trigger GitHub Actions workflow
+# Run this from the repository root
 
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  your-username Deployment Helper" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "🚀 Triggering Deployment Workflow" -ForegroundColor Cyan
 Write-Host ""
 
-# Check if AWS CLI is available
-Write-Host "Checking prerequisites..." -ForegroundColor Yellow
-$awsAvailable = $false
-if (Get-Command aws -ErrorAction SilentlyContinue) {
-    Write-Host "✓ AWS CLI found" -ForegroundColor Green
-    $awsAvailable = $true
-} else {
-    Write-Host "✗ AWS CLI not found (optional - GitHub Actions will use secrets)" -ForegroundColor Yellow
+# Check if gh CLI is installed
+try {
+    $ghVersion = gh --version 2>&1
+    Write-Host "✅ GitHub CLI found" -ForegroundColor Green
+} catch {
+    Write-Host "❌ GitHub CLI not found. Install from: https://cli.github.com/" -ForegroundColor Red
+    Write-Host "   Windows: winget install GitHub.cli" -ForegroundColor Yellow
+    exit 1
 }
 
-Write-Host ""
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  DEPLOYMENT STEPS" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
-
-Write-Host "Step 1: Create Infrastructure" -ForegroundColor Yellow
-Write-Host "  → Go to: https://github.com/akhilsathwik/prospectf-opsera/actions/workflows/your-username-infra.yaml" -ForegroundColor White
-Write-Host "  → Click: 'Run workflow'" -ForegroundColor White
-Write-Host "  → Action: apply" -ForegroundColor White
-Write-Host "  → Branch: prospectf500-app1-opsera" -ForegroundColor White
-Write-Host "  → Click: 'Run workflow' (green button)" -ForegroundColor White
-Write-Host "  → Wait: ~15-20 minutes" -ForegroundColor White
-Write-Host ""
-
-Write-Host "Step 2: Install ArgoCD (First Time Only)" -ForegroundColor Yellow
-Write-Host "  Run these commands after infrastructure is ready:" -ForegroundColor White
-Write-Host "    aws eks update-kubeconfig --name argocd-eu-north-1 --region eu-north-1" -ForegroundColor Gray
-Write-Host "    kubectl create namespace argocd" -ForegroundColor Gray
-Write-Host "    kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml" -ForegroundColor Gray
-Write-Host "    kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd" -ForegroundColor Gray
-Write-Host ""
-
-Write-Host "Step 3: Configure ArgoCD Application" -ForegroundColor Yellow
-Write-Host "  Run these commands:" -ForegroundColor White
-Write-Host "    aws eks update-kubeconfig --name argocd-eu-north-1 --region eu-north-1" -ForegroundColor Gray
-Write-Host "    kubectl apply -f your-username-opsera/argocd/application.yaml" -ForegroundColor Gray
-Write-Host ""
-
-Write-Host "Step 4: Deploy Application" -ForegroundColor Yellow
-Write-Host "  → Go to: https://github.com/akhilsathwik/prospectf-opsera/actions/workflows/your-username-deploy.yaml" -ForegroundColor White
-Write-Host "  → Click: 'Run workflow'" -ForegroundColor White
-Write-Host "  → Branch: prospectf500-app1-opsera" -ForegroundColor White
-Write-Host "  → Click: 'Run workflow' (green button)" -ForegroundColor White
-Write-Host "  → Wait: ~10-15 minutes" -ForegroundColor White
-Write-Host ""
-
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  QUICK LINKS" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Infrastructure Workflow:" -ForegroundColor Yellow
-Write-Host "  https://github.com/akhilsathwik/prospectf-opsera/actions/workflows/your-username-infra.yaml" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Deployment Workflow:" -ForegroundColor Yellow
-Write-Host "  https://github.com/akhilsathwik/prospectf-opsera/actions/workflows/your-username-deploy.yaml" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "GitHub Secrets (verify these exist):" -ForegroundColor Yellow
-Write-Host "  https://github.com/akhilsathwik/prospectf-opsera/settings/secrets/actions" -ForegroundColor Cyan
-Write-Host ""
-
-if ($awsAvailable) {
-    Write-Host "Would you like to check AWS credentials? (y/n)" -ForegroundColor Yellow
-    $response = Read-Host
-    if ($response -eq "y" -or $response -eq "Y") {
-        Write-Host ""
-        Write-Host "Checking AWS identity..." -ForegroundColor Yellow
-        aws sts get-caller-identity
+# Check if authenticated
+try {
+    $authStatus = gh auth status 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "⚠️  Not authenticated. Running: gh auth login" -ForegroundColor Yellow
+        gh auth login
+    } else {
+        Write-Host "✅ Authenticated with GitHub" -ForegroundColor Green
     }
+} catch {
+    Write-Host "❌ Authentication check failed" -ForegroundColor Red
+    exit 1
 }
 
 Write-Host ""
-Write-Host "Ready to deploy! Follow the steps above." -ForegroundColor Green
+Write-Host "Triggering workflow with parameters:" -ForegroundColor Cyan
+Write-Host "  Tenant: opsera-se"
+Write-Host "  App Name: your-username"
+Write-Host "  Environment: dev"
+Write-Host "  Region: us-west-2"
+Write-Host ""
+
+# Trigger workflow
+gh workflow run "Deploy to AWS EKS" `
+  --ref main `
+  -f tenant_name=opsera-se `
+  -f app_name=your-username `
+  -f app_env=dev `
+  -f app_region=us-west-2
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Host ""
+    Write-Host "✅ Workflow triggered successfully!" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Monitor progress at:" -ForegroundColor Cyan
+    Write-Host "  https://github.com/$(gh repo view --json owner,name -q '.owner.login + '/' + .name')/actions" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Expected duration: 30-45 minutes" -ForegroundColor Yellow
+    Write-Host "  - Infrastructure: 15-20 min" -ForegroundColor Gray
+    Write-Host "  - Application: 10-15 min" -ForegroundColor Gray
+    Write-Host "  - Verification: 5-10 min" -ForegroundColor Gray
+} else {
+    Write-Host ""
+    Write-Host "❌ Failed to trigger workflow" -ForegroundColor Red
+    Write-Host "Check your GitHub authentication and repository access" -ForegroundColor Yellow
+    exit 1
+}

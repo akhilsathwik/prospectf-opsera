@@ -1,216 +1,215 @@
-# 🚀 Deploy your-username NOW
+# 🚀 Deploy Now - Quick Start Guide
 
-## ✅ Pre-Deployment Fixes Applied
+## Pre-Deployment Checklist
 
-1. ✅ **Frontend nginx.conf** - Updated to use `your-username-backend` service name
-2. ✅ **ArgoCD Application** - Updated with GitHub repo: `https://github.com/akhilsathwik/prospectf-opsera.git`
-3. ✅ **All manifests** - Created and ready
+- [ ] GitHub Secrets configured:
+  - [ ] `AWS_ACCESS_KEY_ID`
+  - [ ] `AWS_SECRET_ACCESS_KEY`
+- [ ] ArgoCD application repo URL updated (if different from default)
+- [ ] All files committed to repository
 
-## 📋 Pre-Flight Checklist
-
-Before deploying, ensure:
-
-- [x] GitHub repository URL configured in ArgoCD application
-- [x] Frontend nginx.conf updated with correct service name
-- [ ] **GitHub Secrets configured** (REQUIRED):
-  - `AWS_ACCESS_KEY_ID`
-  - `AWS_SECRET_ACCESS_KEY`
-
-## 🎯 Deployment Steps
-
-### Step 1: Verify GitHub Secrets
-
-Go to your GitHub repository:
-1. **Settings** → **Secrets and variables** → **Actions**
-2. Verify these secrets exist:
-   - `AWS_ACCESS_KEY_ID`
-   - `AWS_SECRET_ACCESS_KEY`
-
-If missing, add them now.
-
-### Step 2: Create Infrastructure (First Time - ~20 minutes)
-
-1. Go to: **GitHub** → **Actions** tab
-2. Select: **"your-username Infrastructure"** workflow
-3. Click: **"Run workflow"** button (top right)
-4. Configure:
-   - **Action**: `apply`
-   - **Branch**: `main` (or your branch)
-5. Click: **"Run workflow"** (green button)
-6. **Wait**: ~15-20 minutes for infrastructure creation
-
-**What this creates:**
-- ✅ ArgoCD EKS cluster: `argocd-eu-north-1`
-- ✅ Workload EKS cluster: `opsera-se-eu-north-1-nonprod`
-- ✅ ECR repositories: `opsera-se/your-username-backend`, `opsera-se/your-username-frontend`
-- ✅ S3 bucket: `your-username-tfstate`
-- ✅ DynamoDB table: `your-username-tfstate-lock`
-
-**Monitor progress:**
-- Watch the workflow run in GitHub Actions
-- Check for any errors in the logs
-- Wait for "Terraform Apply" step to complete
-
-### Step 3: Install ArgoCD (First Time Only)
-
-After infrastructure is created, install ArgoCD on the ArgoCD cluster:
+## Step 1: Commit and Push Changes
 
 ```bash
-# Configure kubectl for ArgoCD cluster
-aws eks update-kubeconfig --name argocd-eu-north-1 --region eu-north-1
+# Navigate to repository root
+cd /path/to/prospectf500-App1-main
 
-# Install ArgoCD
-kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# Check current branch
+git branch
 
-# Wait for ArgoCD to be ready (takes 2-3 minutes)
-kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd
+# If not on main, switch to main
+git checkout main
 
-# Get admin password
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
-echo ""  # New line after password
+# Add all changes
+git add .
+
+# Commit changes
+git commit -m "Add your-username deployment configuration for us-west-2"
+
+# Push to GitHub
+git push origin main
 ```
 
-**Save the password** - you'll need it to access ArgoCD UI.
+## Step 2: Trigger Deployment Workflow
 
-### Step 4: Configure ArgoCD Application
+### Option A: Via GitHub Web UI (Recommended)
 
-Apply the ArgoCD application manifest:
+1. Go to your GitHub repository
+2. Click on **Actions** tab
+3. Select **"Deploy to AWS EKS"** workflow from the left sidebar
+4. Click **"Run workflow"** button (top right)
+5. Verify inputs:
+   - Tenant name: `opsera-se`
+   - Application name: `your-username`
+   - Environment: `dev`
+   - AWS region: `us-west-2`
+6. Click **"Run workflow"**
+
+### Option B: Via GitHub CLI
 
 ```bash
-# Make sure you're on the ArgoCD cluster
-aws eks update-kubeconfig --name argocd-eu-north-1 --region eu-north-1
+# Install GitHub CLI if not installed
+# Windows: winget install GitHub.cli
+# Mac: brew install gh
+# Linux: See https://cli.github.com/
 
-# Apply ArgoCD application
-kubectl apply -f your-username-opsera/argocd/application.yaml
+# Authenticate (if not already)
+gh auth login
 
-# Verify application created
-kubectl get applications -n argocd
+# Trigger workflow
+gh workflow run "Deploy to AWS EKS" \
+  --ref main \
+  -f tenant_name=opsera-se \
+  -f app_name=your-username \
+  -f app_env=dev \
+  -f app_region=us-west-2
 ```
 
-### Step 5: Deploy Application (~15 minutes)
+### Option C: Via PowerShell Script
 
-1. Go to: **GitHub** → **Actions** tab
-2. Select: **"your-username Deploy"** workflow
-3. Click: **"Run workflow"** button
-4. Configure:
-   - **Branch**: `main` (or your branch)
-5. Click: **"Run workflow"** (green button)
-6. **Wait**: ~10-15 minutes for deployment
+```powershell
+# Run this from repository root
+gh workflow run "Deploy to AWS EKS" `
+  --ref main `
+  -f tenant_name=opsera-se `
+  -f app_name=your-username `
+  -f app_env=dev `
+  -f app_region=us-west-2
 
-**What this does:**
-- ✅ Builds Docker images (backend + frontend)
-- ✅ Pushes images to ECR
-- ✅ Runs Grype security scan
-- ✅ Updates Kubernetes manifests with image tags
-- ✅ Deploys to workload cluster
-- ✅ Verifies endpoint is accessible
+Write-Host "✅ Workflow triggered! Monitor at: https://github.com/YOUR_ORG/YOUR_REPO/actions" -ForegroundColor Green
+```
 
-**Monitor progress:**
-- Watch the workflow run
-- Check each job:
-  - `discover-infrastructure` - Should show greenfield deployment
-  - `build-and-push` - Builds and pushes images
-  - `update-manifests` - Updates kustomization.yaml
-  - `deploy-to-cluster` - Deploys to Kubernetes
-  - `verify-endpoint` - Verifies HTTP 200 response
+## Step 3: Monitor Deployment
 
-## 🔍 Verification
+### Watch Workflow Progress
 
-After deployment completes, verify everything is working:
+1. Go to **Actions** tab in GitHub
+2. Click on the running workflow
+3. Monitor each phase:
+   - **Phase 1: Infrastructure** (15-20 min)
+     - VPC creation
+     - EKS cluster creation
+     - Node group creation
+     - ArgoCD installation
+   - **Phase 2: Application** (10-15 min)
+     - Docker image build
+     - ECR push
+     - Manifest updates
+   - **Phase 3: Verification** (5-10 min)
+     - ArgoCD sync
+     - Pod readiness
+     - Endpoint verification
+
+### Check Logs
+
+Click on any job to see detailed logs. Common things to watch for:
+
+- ✅ Infrastructure discovery
+- ✅ Resource creation
+- ✅ Image build and push
+- ✅ ArgoCD sync status
+- ✅ Endpoint HTTP 200 verification
+
+## Step 4: Get Your Endpoint
+
+After successful deployment, the endpoint URL will be in:
+
+1. **GitHub Actions Summary**: Check the "Summary" step in Phase 3
+2. **Kubernetes Service**: Run this command:
 
 ```bash
-# Configure kubectl for workload cluster
-aws eks update-kubeconfig --name opsera-se-eu-north-1-nonprod --region eu-north-1
+# Configure kubectl
+aws eks update-kubeconfig --name opsera-usw2-np --region us-west-2
 
-# Check pods are running
+# Get endpoint
+kubectl get svc your-username-frontend -n your-username-dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+```
+
+## Expected Timeline
+
+| Phase | Duration | What Happens |
+|-------|----------|--------------|
+| Infrastructure | 15-20 min | VPC, EKS clusters, ECR, ArgoCD |
+| Application | 10-15 min | Build, push images, update manifests |
+| Verification | 5-10 min | ArgoCD sync, endpoint check |
+| **Total** | **30-45 min** | Complete deployment |
+
+## Troubleshooting
+
+### Workflow Fails at Infrastructure Phase
+
+**Issue**: Terraform or AWS CLI errors
+- Check AWS credentials in GitHub Secrets
+- Verify IAM permissions for EKS, ECR, VPC creation
+- Check AWS region availability
+
+### Workflow Fails at Application Phase
+
+**Issue**: Docker build or ECR push fails
+- Verify Dockerfile exists in `backend/` and `frontend/`
+- Check ECR repository was created
+- Verify image tags are correct
+
+### Workflow Fails at Verification Phase
+
+**Issue**: ArgoCD sync or endpoint verification fails
+- Check ArgoCD application manifest path
+- Verify repository URL in `application.yaml`
+- Check pod logs: `kubectl logs -n your-username-dev deployment/your-username-backend`
+
+### Pods Stuck in ImagePullBackOff
+
+**Issue**: Cannot pull images from ECR
+- Verify images exist: `aws ecr describe-images --repository-name opsera-se/your-username-backend`
+- Check ECR repository permissions
+- Verify image tags in `kustomization.yaml` (should NOT have placeholders)
+
+## Post-Deployment
+
+### Access Your Application
+
+```bash
+# Get endpoint
+ENDPOINT=$(kubectl get svc your-username-frontend -n your-username-dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+# Test endpoint
+curl http://$ENDPOINT
+
+# Or open in browser
+echo "Open: http://$ENDPOINT"
+```
+
+### Check Application Status
+
+```bash
+# Check pods
 kubectl get pods -n your-username-dev
-
-# Expected output:
-# NAME                                    READY   STATUS    RESTARTS   AGE
-# your-username-backend-xxxxx-xxxxx      1/1     Running   0          2m
-# your-username-frontend-xxxxx-xxxxx     1/1     Running   0          2m
 
 # Check services
 kubectl get svc -n your-username-dev
 
-# Expected output:
-# NAME                      TYPE           CLUSTER-IP      EXTERNAL-IP
-# your-username-backend     ClusterIP      10.100.x.x      <none>
-# your-username-frontend    LoadBalancer   10.100.x.x      xxxxxx.eu-north-1.elb.amazonaws.com
-
-# Get LoadBalancer endpoint
-kubectl get svc your-username-frontend -n your-username-dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-echo ""
-
-# Test endpoint
-ENDPOINT=$(kubectl get svc your-username-frontend -n your-username-dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-curl -v http://$ENDPOINT
+# Check ArgoCD application
+kubectl get application your-username-dev -n argocd
 ```
 
-## 🐛 Troubleshooting
+### View Logs
 
-### Infrastructure Workflow Fails
+```bash
+# Backend logs
+kubectl logs -n your-username-dev deployment/your-username-backend -f
 
-**Issue**: Terraform fails with "resource already exists"
-- **Solution**: The workflow will auto-import existing resources. If it still fails, check the logs.
+# Frontend logs
+kubectl logs -n your-username-dev deployment/your-username-frontend -f
+```
 
-**Issue**: AWS credentials error
-- **Solution**: Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are set in GitHub Secrets
+## Next Steps
 
-### Deployment Workflow Fails
-
-**Issue**: ImagePullBackOff in pods
-- **Solution**: 
-  ```bash
-  kubectl describe pod <pod-name> -n your-username-dev
-  ```
-  Check if ECR image URL is correct (no placeholders)
-
-**Issue**: LoadBalancer stuck in "Pending"
-- **Solution**: Wait 3-5 minutes. AWS needs time to provision the LoadBalancer.
-
-**Issue**: Endpoint verification fails
-- **Solution**: 
-  1. Check pod logs: `kubectl logs -n your-username-dev deployment/your-username-frontend`
-  2. Verify LoadBalancer DNS resolves: `nslookup <endpoint>`
-  3. Check security groups allow traffic on port 80
-
-### ArgoCD Sync Issues
-
-**Issue**: ArgoCD application shows "Unknown" or "Error"
-- **Solution**: 
-  ```bash
-  kubectl describe application your-username-dev -n argocd
-  ```
-  Check the events for specific errors.
-
-## 📊 Expected Timeline
-
-| Step | Duration | Status |
-|------|----------|--------|
-| Infrastructure Creation | 15-20 min | ⏳ Pending |
-| ArgoCD Installation | 2-3 min | ⏳ Pending |
-| Application Deployment | 10-15 min | ⏳ Pending |
-| **Total** | **~30-40 min** | |
-
-## ✅ Success Criteria
-
-Deployment is successful when:
-
-1. ✅ All GitHub Actions workflows complete without errors
-2. ✅ Pods are in "Running" state (not ImagePullBackOff/CrashLoopBackOff)
-3. ✅ Frontend service has LoadBalancer endpoint
-4. ✅ Endpoint responds with HTTP 200
-5. ✅ ArgoCD application shows "Synced" status
-
-## 🎉 Next Steps After Deployment
-
-1. **Set up DNS** (optional): Create Route53 record pointing to LoadBalancer
-2. **Update CORS** (if needed): Add production URL to backend CORS origins
-3. **Configure monitoring**: Set up CloudWatch metrics
-4. **Set up CI/CD**: Enable automatic deployments on push
+1. ✅ **Deployment Complete** - Your app is live!
+2. 🔄 **Configure HTTPS** - Add ACM certificate for HTTPS
+3. 🔄 **Set up DNS** - Point custom domain to LoadBalancer
+4. 🔄 **Configure Monitoring** - Set up CloudWatch metrics
+5. 🔄 **Add Secrets** - Configure OpenAI API key if needed
 
 ---
 
-**Ready?** Start with **Step 1: Verify GitHub Secrets**, then proceed to **Step 2: Create Infrastructure**
+**Ready to deploy?** Follow Step 1 and Step 2 above! 🚀

@@ -32,6 +32,19 @@ spec:
               name: your-username-secrets
               key: openai-api-key
               optional: true
+        # Learning #139: AWS credentials for IRSA fallback
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: AWS_ACCESS_KEY_ID
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: AWS_SECRET_ACCESS_KEY
+              optional: true
         resources:
           requests:
             cpu: 100m

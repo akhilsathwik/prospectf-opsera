@@ -10,6 +10,7 @@ resources:
   - frontend-deployment.yaml
   - frontend-service.yaml
 
+# Images will be overridden by overlays/dev/kustomization.yaml
 images:
   - name: PLACEHOLDER_ECR_BACKEND
     newName: PLACEHOLDER_ECR_BACKEND
