@@ -7,9 +7,9 @@ resources:
   - ../../base
 
 images:
-  - name: PLACEHOLDER_ECR_BACKEND
-    newName: PLACEHOLDER_ECR_BACKEND
-    newTag: latest
-  - name: PLACEHOLDER_ECR_FRONTEND
-    newName: PLACEHOLDER_ECR_FRONTEND
-    newTag: latest
+  - name: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-backend
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-backend
+    newTag: "c67951e9fd14067ce6252bfcf027301e8a7c58af"
+  - name: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-frontend
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-frontend
+    newTag: "c67951e9fd14067ce6252bfcf027301e8a7c58af"
