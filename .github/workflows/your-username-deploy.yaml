@@ -874,10 +874,57 @@ jobs:
             --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
             --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} || true
 
+      - name: Register Workload Cluster with ArgoCD
+        run: |
+          echo "Registering workload cluster with ArgoCD..."
+          
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
+          
+          # Get workload cluster endpoint and CA certificate
+          WORKLOAD_ENDPOINT=$(aws eks describe-cluster --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }} --query 'cluster.endpoint' --output text)
+          WORKLOAD_CA=$(aws eks describe-cluster --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }} --query 'cluster.certificateAuthority.data' --output text)
+          WORKLOAD_NAME="${{ needs.infrastructure.outputs.workload_cluster }}"
+          
+          # Create cluster secret for ArgoCD
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: ${WORKLOAD_NAME}-secret
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: cluster
+          type: Opaque
+          stringData:
+            name: ${WORKLOAD_NAME}
+            server: ${WORKLOAD_ENDPOINT}
+            config: |
+              {
+                "bearerToken": "",
+                "tlsClientConfig": {
+                  "caData": "${WORKLOAD_CA}",
+                  "insecure": false
+                },
+                "awsAuthConfig": {
+                  "clusterName": "${WORKLOAD_NAME}"
+                }
+              }
+          EOF
+          
+          echo "✅ Workload cluster registered with ArgoCD"
+
       - name: Apply ArgoCD Application
         run: |
           aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
-          kubectl apply -f ${{ inputs.app_name }}-opsera/argocd/application.yaml || true
+          
+          # Update application.yaml to use workload cluster name instead of kubernetes.default.svc
+          WORKLOAD_NAME="${{ needs.infrastructure.outputs.workload_cluster }}"
+          APP_FILE="${{ inputs.app_name }}-opsera/argocd/application.yaml"
+          
+          # Create temporary file with updated destination
+          sed "s|server: https://kubernetes.default.svc|name: ${WORKLOAD_NAME}|g" "$APP_FILE" > /tmp/application.yaml
+          
+          kubectl apply -f /tmp/application.yaml || true
 
       - name: Wait for ArgoCD Sync
         run: |
@@ -898,11 +945,32 @@ jobs:
           aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }}
           
           NAMESPACE="${{ needs.infrastructure.outputs.namespace }}"
-          
           APP_NAME="${{ inputs.app_name }}"
           
+          # Wait for namespace to be created by ArgoCD
+          echo "Waiting for namespace $NAMESPACE to be created..."
+          for i in {1..30}; do
+            if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
+              echo "✅ Namespace $NAMESPACE exists"
+              break
+            fi
+            echo "Waiting for namespace... ($i/30)"
+            sleep 10
+          done
+          
+          # Check if namespace exists, if not, exit with error
+          if ! kubectl get namespace "$NAMESPACE" 2>/dev/null; then
+            echo "❌ Namespace $NAMESPACE not found after waiting"
+            echo "Checking ArgoCD application status..."
+            aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
+            kubectl get application "${{ inputs.app_name }}-${{ inputs.app_env }}" -n argocd -o yaml || true
+            exit 1
+          fi
+          
           # Wait for pods
+          echo "Waiting for backend pods..."
           kubectl wait --for=condition=ready pod -l app=${APP_NAME}-backend -n $NAMESPACE --timeout=300s || true
+          echo "Waiting for frontend pods..."
           kubectl wait --for=condition=ready pod -l app=${APP_NAME}-frontend -n $NAMESPACE --timeout=300s || true
 
           # Get LoadBalancer endpoint
@@ -918,12 +986,23 @@ jobs:
 
       - name: Verify HTTP 200
         run: |
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }}
+          
           NAMESPACE="${{ needs.infrastructure.outputs.namespace }}"
           APP_NAME="${{ inputs.app_name }}"
-          ENDPOINT=$(kubectl get svc ${APP_NAME}-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          
+          # Check if namespace exists first
+          if ! kubectl get namespace "$NAMESPACE" 2>/dev/null; then
+            echo "❌ Namespace $NAMESPACE not found"
+            exit 1
+          fi
+          
+          ENDPOINT=$(kubectl get svc ${APP_NAME}-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
           
           if [ -z "$ENDPOINT" ]; then
             echo "❌ LoadBalancer endpoint not found"
+            echo "Checking service status..."
+            kubectl get svc -n $NAMESPACE || true
             exit 1
           fi
           

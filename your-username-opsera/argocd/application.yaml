@@ -12,7 +12,9 @@ spec:
     targetRevision: HEAD
     path: your-username-opsera/k8s/overlays/dev
   destination:
-    server: https://kubernetes.default.svc
+    # Workload cluster will be registered with ArgoCD and referenced by name
+    # The workflow will update this to use the cluster name
+    name: opsera-se-usw2-np
     namespace: your-username-dev
   syncPolicy:
     automated:
