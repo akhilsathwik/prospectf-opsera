@@ -11,10 +11,11 @@ resources:
 
 
 
+
 images:
   - name: PLACEHOLDER_ECR_BACKEND
-    newName: 792373136340.dkr.ecr.ap-south-1.amazonaws.com/opsera-se/your-username-backend
-    newTag: "5540feaa4f96865ab192d85297ef2d90126868b5"
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-backend
+    newTag: "9fbc08eb204a503b56f76e249f95e080b844413d"
   - name: PLACEHOLDER_ECR_FRONTEND
-    newName: 792373136340.dkr.ecr.ap-south-1.amazonaws.com/opsera-se/your-username-frontend
-    newTag: "5540feaa4f96865ab192d85297ef2d90126868b5"
+    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-frontend
+    newTag: "9fbc08eb204a503b56f76e249f95e080b844413d"
