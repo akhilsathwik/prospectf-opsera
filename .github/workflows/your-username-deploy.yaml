@@ -883,25 +883,37 @@ jobs:
           echo "  Backend: $ECR_BACKEND:$IMAGE_TAG"
           echo "  Frontend: $ECR_FRONTEND:$IMAGE_TAG"
 
-          # Replace backend image
-          sed -i "s|PLACEHOLDER_ECR_BACKEND|${ECR_BACKEND}|g" kustomization.yaml
-          sed -i "/name: PLACEHOLDER_ECR_BACKEND/,/newTag:/ s|newName: .*|newName: ${ECR_BACKEND}|" kustomization.yaml
-          sed -i "/name: PLACEHOLDER_ECR_BACKEND/,/newTag:/ s|newTag: .*|newTag: \"${IMAGE_TAG}\"|" kustomization.yaml
+          # Use kustomize edit to properly update images
+          if command -v kustomize &> /dev/null; then
+            echo "Using kustomize edit to update images..."
+            kustomize edit set image PLACEHOLDER_ECR_BACKEND=${ECR_BACKEND}:${IMAGE_TAG}
+            kustomize edit set image PLACEHOLDER_ECR_FRONTEND=${ECR_FRONTEND}:${IMAGE_TAG}
+          else
+            echo "kustomize not found, using sed..."
+            # Replace backend image
+            sed -i "s|PLACEHOLDER_ECR_BACKEND|${ECR_BACKEND}|g" kustomization.yaml
+            sed -i "/name: PLACEHOLDER_ECR_BACKEND/,/newTag:/ s|newName: .*|newName: ${ECR_BACKEND}|" kustomization.yaml
+            sed -i "/name: PLACEHOLDER_ECR_BACKEND/,/newTag:/ s|newTag: .*|newTag: \"${IMAGE_TAG}\"|" kustomization.yaml
 
-          # Replace frontend image
-          sed -i "s|PLACEHOLDER_ECR_FRONTEND|${ECR_FRONTEND}|g" kustomization.yaml
-          sed -i "/name: PLACEHOLDER_ECR_FRONTEND/,/newTag:/ s|newName: .*|newName: ${ECR_FRONTEND}|" kustomization.yaml
-          sed -i "/name: PLACEHOLDER_ECR_FRONTEND/,/newTag:/ s|newTag: .*|newTag: \"${IMAGE_TAG}\"|" kustomization.yaml
-
-          # Update all tags to use the same tag
-          sed -i "s|newTag: .*|newTag: \"${IMAGE_TAG}\"|g" kustomization.yaml
+            # Replace frontend image
+            sed -i "s|PLACEHOLDER_ECR_FRONTEND|${ECR_FRONTEND}|g" kustomization.yaml
+            sed -i "/name: PLACEHOLDER_ECR_FRONTEND/,/newTag:/ s|newName: .*|newName: ${ECR_FRONTEND}|" kustomization.yaml
+            sed -i "/name: PLACEHOLDER_ECR_FRONTEND/,/newTag:/ s|newTag: .*|newTag: \"${IMAGE_TAG}\"|" kustomization.yaml
+          fi
 
           # Validate no placeholders
           if grep -q "PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
-            echo "ERROR: Placeholders found!"
+            echo "❌ ERROR: Placeholders found after update!"
+            echo "Current kustomization.yaml content:"
+            cat kustomization.yaml
             grep -n "PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml
             exit 1
           fi
+          
+          echo ""
+          echo "✅ kustomization.yaml updated successfully"
+          echo "Final content:"
+          cat kustomization.yaml
 
           echo ""
           echo "=== Updated kustomization.yaml ==="
@@ -936,14 +948,12 @@ jobs:
         run: |
           aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }}
 
-      - name: Create AWS Credentials Secret
+      - name: Create AWS Credentials Secret (After Namespace)
         run: |
           # Learning #139: Create aws-credentials secret for IRSA fallback
-          kubectl delete secret aws-credentials -n ${{ needs.infrastructure.outputs.namespace }} --ignore-not-found || true
-          kubectl create secret generic aws-credentials \
-            --namespace ${{ needs.infrastructure.outputs.namespace }} \
-            --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
-            --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} || true
+          # Note: Namespace will be created by ArgoCD, so we'll create secret after sync
+          # This step is moved to after ArgoCD sync completes
+          echo "AWS credentials secret will be created after namespace exists"
 
       - name: Register Workload Cluster with ArgoCD (Learning #158)
         run: |
@@ -1038,6 +1048,33 @@ jobs:
           echo "   Cluster: $WORKLOAD_CLUSTER"
           echo "   Endpoint: $WORKLOAD_ENDPOINT"
 
+      - name: Verify Repository Secret Exists (Learning #162)
+        run: |
+          echo "========================================"
+          echo "VERIFYING ARGOCD REPOSITORY SECRET"
+          echo "========================================"
+          
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
+          
+          # Check if Repository Secret exists
+          REPO_SECRET=$(kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=repository -o jsonpath='{.items[?(@.metadata.name=="repo-'${{ inputs.app_name }}'")].metadata.name}' 2>/dev/null || echo "")
+          
+          if [ -z "$REPO_SECRET" ]; then
+            echo "⚠️  Repository Secret not found. Creating..."
+            kubectl create secret generic repo-${{ inputs.app_name }} \
+              --namespace argocd \
+              --from-literal=type=git \
+              --from-literal=url=https://github.com/${{ github.repository }}.git \
+              --from-literal=username=git \
+              --from-literal=password=${{ secrets.GITHUB_TOKEN }} \
+              --dry-run=client -o yaml | \
+              kubectl label -f - argocd.argoproj.io/secret-type=repository --local -o yaml | \
+              kubectl apply -f -
+            echo "✅ Repository Secret created"
+          else
+            echo "✅ Repository Secret exists: $REPO_SECRET"
+          fi
+
       - name: Apply ArgoCD Application (Learning #164)
         run: |
           echo "========================================"
@@ -1053,6 +1090,14 @@ jobs:
           
           # Learning #160: Use deploy branch for manifests
           DEPLOY_BRANCH="${{ env.DEPLOY_BRANCH }}"
+          
+          echo "Application Configuration:"
+          echo "  Name: $APP_NAME"
+          echo "  Source Branch: $DEPLOY_BRANCH"
+          echo "  Source Path: ${{ inputs.app_name }}-opsera/k8s/overlays/${{ inputs.app_env }}"
+          echo "  Target Cluster: $WORKLOAD_NAME"
+          echo "  Target Endpoint: $WORKLOAD_ENDPOINT"
+          echo "  Target Namespace: ${{ needs.infrastructure.outputs.namespace }}"
           
           # Create ArgoCD Application manifest
           cat <<EOF | kubectl apply -f -
@@ -1087,30 +1132,97 @@ jobs:
           echo "✅ ArgoCD Application created: $APP_NAME"
           echo "   Target cluster: $WORKLOAD_NAME"
           echo "   Source branch: $DEPLOY_BRANCH"
+          
+          # Verify Application was created
+          sleep 5
+          if kubectl get application "$APP_NAME" -n argocd 2>/dev/null; then
+            echo "✅ Application verified in ArgoCD"
+          else
+            echo "❌ ERROR: Application not found after creation!"
+            exit 1
+          fi
 
       - name: Wait for ArgoCD Sync
         run: |
+          echo "========================================"
+          echo "WAITING FOR ARGOCD SYNC"
+          echo "========================================"
+          
           aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
           APP_NAME="${{ inputs.app_name }}-${{ inputs.app_env }}"
+          
+          echo "Checking ArgoCD Application: $APP_NAME"
+          
+          # Check if Application exists
+          if ! kubectl get application "$APP_NAME" -n argocd 2>/dev/null; then
+            echo "❌ ERROR: ArgoCD Application '$APP_NAME' not found!"
+            echo "Application may not have been created. Checking..."
+            kubectl get applications -n argocd
+            exit 1
+          fi
+          
+          # Get detailed status for debugging
+          echo ""
+          echo "=== ArgoCD Application Status ==="
+          kubectl get application "$APP_NAME" -n argocd -o jsonpath='{.status}' | jq '.' || kubectl get application "$APP_NAME" -n argocd -o yaml | grep -A 20 "status:"
+          
+          # Check conditions for errors
+          CONDITIONS=$(kubectl get application "$APP_NAME" -n argocd -o jsonpath='{.status.conditions[*].message}' 2>/dev/null || echo "")
+          if [ -n "$CONDITIONS" ]; then
+            echo ""
+            echo "=== Application Conditions ==="
+            echo "$CONDITIONS"
+          fi
+          
+          echo ""
+          echo "Waiting for sync status to become 'Synced'..."
+          
           for i in {1..60}; do
             STATUS=$(kubectl get application "$APP_NAME" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+            HEALTH=$(kubectl get application "$APP_NAME" -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+            
             if [ "$STATUS" = "Synced" ]; then
               echo "✅ ArgoCD sync complete"
+              echo "   Sync Status: $STATUS"
+              echo "   Health Status: $HEALTH"
               break
             fi
-            echo "Waiting for ArgoCD sync... ($i/60) - Status: $STATUS"
+            
+            # Show detailed status every 10 iterations
+            if [ $((i % 10)) -eq 0 ]; then
+              echo ""
+              echo "=== Detailed Status (iteration $i) ==="
+              kubectl get application "$APP_NAME" -n argocd -o jsonpath='{.status}' | jq '.' 2>/dev/null || echo "Status: $STATUS, Health: $HEALTH"
+              echo ""
+            fi
+            
+            echo "Waiting for ArgoCD sync... ($i/60) - Status: $STATUS, Health: $HEALTH"
             sleep 10
           done
+          
+          # Final status check
+          FINAL_STATUS=$(kubectl get application "$APP_NAME" -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+          if [ "$FINAL_STATUS" != "Synced" ]; then
+            echo ""
+            echo "⚠️  WARNING: ArgoCD sync did not complete"
+            echo "   Final Status: $FINAL_STATUS"
+            echo ""
+            echo "=== Full Application Status ==="
+            kubectl get application "$APP_NAME" -n argocd -o yaml | grep -A 30 "status:"
+            echo ""
+            echo "=== ArgoCD Controller Logs (last 20 lines) ==="
+            kubectl logs -n argocd -l app.kubernetes.io/name=argocd-application-controller --tail=20 || echo "Could not retrieve logs"
+            echo ""
+            echo "Continuing with verification (namespace may still be created)..."
+          fi
 
-      - name: Verify Deployment
+      - name: Create AWS Credentials Secret (After Namespace Created)
         run: |
           aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }}
-          
           NAMESPACE="${{ needs.infrastructure.outputs.namespace }}"
-          APP_NAME="${{ inputs.app_name }}"
           
-          # Wait for namespace to be created by ArgoCD
-          echo "Waiting for namespace $NAMESPACE to be created..."
+          # Wait for namespace to be created by ArgoCD first
+          echo "Waiting for namespace $NAMESPACE to be created by ArgoCD..."
           for i in {1..30}; do
             if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
               echo "✅ Namespace $NAMESPACE exists"
@@ -1120,14 +1232,39 @@ jobs:
             sleep 10
           done
           
-          # Check if namespace exists, if not, exit with error
+          # Create secret only if namespace exists
+          if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
+            echo "Creating AWS credentials secret in namespace $NAMESPACE..."
+            kubectl delete secret aws-credentials -n "$NAMESPACE" --ignore-not-found || true
+            kubectl create secret generic aws-credentials \
+              --namespace "$NAMESPACE" \
+              --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
+              --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} || true
+            echo "✅ AWS credentials secret created"
+          else
+            echo "⚠️  Namespace $NAMESPACE not found - secret will be created when namespace exists"
+          fi
+
+      - name: Verify Deployment
+        run: |
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }}
+          
+          NAMESPACE="${{ needs.infrastructure.outputs.namespace }}"
+          APP_NAME="${{ inputs.app_name }}"
+          
+          # Check if namespace exists
           if ! kubectl get namespace "$NAMESPACE" 2>/dev/null; then
-            echo "❌ Namespace $NAMESPACE not found after waiting"
+            echo "❌ Namespace $NAMESPACE not found"
             echo "Checking ArgoCD application status..."
             aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
-            kubectl get application "${{ inputs.app_name }}-${{ inputs.app_env }}" -n argocd -o yaml || true
+            kubectl get application "${{ inputs.app_name }}-${{ inputs.app_env }}" -n argocd -o yaml | grep -A 30 "status:" || true
+            echo ""
+            echo "=== ArgoCD Application Conditions ==="
+            kubectl get application "${{ inputs.app_name }}-${{ inputs.app_env }}" -n argocd -o jsonpath='{.status.conditions[*]}' | jq -r '.' || true
             exit 1
           fi
+          
+          echo "✅ Namespace $NAMESPACE exists"
           
           # Wait for pods
           echo "Waiting for backend pods..."
