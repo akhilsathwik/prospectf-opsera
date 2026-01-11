@@ -93,13 +93,16 @@ jobs:
           echo "Workload Security Group: $WORKLOAD_SG"
           echo "ArgoCD VPC CIDR: $ARGOCD_VPC_CIDR"
           
-          # Check if rule exists
-          EXISTING_RULE=$(aws ec2 describe-security-group-rules \
+          # Check if rule exists (use simpler approach - just try to add, ignore if exists)
+          echo "Checking for existing security group rule..."
+          EXISTING_RULES=$(aws ec2 describe-security-group-rules \
             --filters "Name=group-id,Values=$WORKLOAD_SG" "Name=is-egress,Values=false" \
-            --query "SecurityGroupRules[?CidrIpv4=='$ARGOCD_VPC_CIDR' && FromPort==443 && ToPort==443]" \
             --region ${{ inputs.app_region }} --output json)
           
-          if [ "$(echo "$EXISTING_RULE" | jq 'length')" -eq 0 ]; then
+          RULE_EXISTS=$(echo "$EXISTING_RULES" | jq -r --arg cidr "$ARGOCD_VPC_CIDR" \
+            '.SecurityGroupRules[] | select(.CidrIpv4 == $cidr and .FromPort == 443 and .ToPort == 443) | .SecurityGroupRuleId' | head -1)
+          
+          if [ -z "$RULE_EXISTS" ]; then
             echo "Adding security group rule..."
             aws ec2 authorize-security-group-ingress \
               --group-id "$WORKLOAD_SG" \
