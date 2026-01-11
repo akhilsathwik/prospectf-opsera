@@ -1071,19 +1071,47 @@ jobs:
           
           if [ -z "$REPO_SECRET" ]; then
             echo "⚠️  Repository Secret not found. Creating..."
-            kubectl create secret generic repo-${{ inputs.app_name }} \
-              --namespace argocd \
-              --from-literal=type=git \
-              --from-literal=url=https://github.com/${{ github.repository }}.git \
-              --from-literal=username=git \
-              --from-literal=password=${{ secrets.GITHUB_TOKEN }} \
-              --dry-run=client -o yaml | \
-              kubectl label -f - argocd.argoproj.io/secret-type=repository --local -o yaml | \
-              kubectl apply -f -
-            echo "✅ Repository Secret created"
           else
-            echo "✅ Repository Secret exists: $REPO_SECRET"
+            echo "⚠️  Repository Secret exists but may need update. Recreating..."
+            kubectl delete secret "$REPO_SECRET" -n argocd || true
           fi
+          
+          # Create Repository Secret with correct format for GitHub token authentication
+          # For GitHub: username can be anything (token is used), password is the token
+          # OR use GitHub username with token as password
+          GITHUB_USERNAME="${{ github.actor }}"
+          GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          
+          echo "Creating Repository Secret for: https://github.com/${{ github.repository }}.git"
+          echo "Using GitHub username: $GITHUB_USERNAME"
+          
+          # Create secret using YAML to ensure correct format
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: repo-${{ inputs.app_name }}
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: repository
+          type: Opaque
+          stringData:
+            type: git
+            url: https://github.com/${{ github.repository }}.git
+            password: ${GITHUB_TOKEN}
+            username: ${GITHUB_USERNAME}
+          EOF
+          
+          echo "✅ Repository Secret created/updated"
+          
+          # Verify secret was created correctly
+          echo ""
+          echo "Verifying secret..."
+          kubectl get secret repo-${{ inputs.app_name }} -n argocd -o jsonpath='{.metadata.name}' && echo " ✅ Secret exists" || echo " ❌ Secret not found"
+          
+          # Wait a moment for ArgoCD to pick up the secret
+          echo "Waiting 5 seconds for ArgoCD to recognize the secret..."
+          sleep 5
 
       - name: Apply ArgoCD Application (Learning #164)
         run: |
