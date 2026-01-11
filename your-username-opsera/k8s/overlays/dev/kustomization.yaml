@@ -9,7 +9,7 @@ resources:
 images:
   - name: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-backend
     newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-backend
-    newTag: "7ac452e099c9a200c9d8558f4bc220e590c69cc0"
+    newTag: "51a04f819a86b3048abe9c9153efa704690052f5"
   - name: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-frontend
     newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-frontend
-    newTag: "7ac452e099c9a200c9d8558f4bc220e590c69cc0"
+    newTag: "51a04f819a86b3048abe9c9153efa704690052f5"
