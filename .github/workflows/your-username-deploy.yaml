@@ -882,38 +882,48 @@ jobs:
           echo "Updating kustomization.yaml with:"
           echo "  Backend: $ECR_BACKEND:$IMAGE_TAG"
           echo "  Frontend: $ECR_FRONTEND:$IMAGE_TAG"
+          echo ""
 
-          # Use kustomize edit to properly update images
-          if command -v kustomize &> /dev/null; then
-            echo "Using kustomize edit to update images..."
-            kustomize edit set image PLACEHOLDER_ECR_BACKEND=${ECR_BACKEND}:${IMAGE_TAG}
-            kustomize edit set image PLACEHOLDER_ECR_FRONTEND=${ECR_FRONTEND}:${IMAGE_TAG}
-          else
-            echo "kustomize not found, using sed..."
-            # Replace backend image
-            sed -i "s|PLACEHOLDER_ECR_BACKEND|${ECR_BACKEND}|g" kustomization.yaml
-            sed -i "/name: PLACEHOLDER_ECR_BACKEND/,/newTag:/ s|newName: .*|newName: ${ECR_BACKEND}|" kustomization.yaml
-            sed -i "/name: PLACEHOLDER_ECR_BACKEND/,/newTag:/ s|newTag: .*|newTag: \"${IMAGE_TAG}\"|" kustomization.yaml
+          # Backup original
+          cp kustomization.yaml kustomization.yaml.bak
 
-            # Replace frontend image
-            sed -i "s|PLACEHOLDER_ECR_FRONTEND|${ECR_FRONTEND}|g" kustomization.yaml
-            sed -i "/name: PLACEHOLDER_ECR_FRONTEND/,/newTag:/ s|newName: .*|newName: ${ECR_FRONTEND}|" kustomization.yaml
-            sed -i "/name: PLACEHOLDER_ECR_FRONTEND/,/newTag:/ s|newTag: .*|newTag: \"${IMAGE_TAG}\"|" kustomization.yaml
-          fi
+          # Remove all existing image entries (may have old entries from previous deployments)
+          # Keep everything except the images section, then add new images
+          awk '/^images:/{flag=1} /^[a-zA-Z]/{if(flag && !/^images:/) flag=0} !flag' kustomization.yaml > kustomization.yaml.tmp
 
-          # Validate no placeholders
-          if grep -q "PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml; then
-            echo "❌ ERROR: Placeholders found after update!"
-            echo "Current kustomization.yaml content:"
-            cat kustomization.yaml
-            grep -n "PLACEHOLDER\|TODO\|CHANGEME" kustomization.yaml
+          # Add new images section
+          cat >> kustomization.yaml.tmp <<EOF
+
+          images:
+            - name: PLACEHOLDER_ECR_BACKEND
+              newName: ${ECR_BACKEND}
+              newTag: "${IMAGE_TAG}"
+            - name: PLACEHOLDER_ECR_FRONTEND
+              newName: ${ECR_FRONTEND}
+              newTag: "${IMAGE_TAG}"
+          EOF
+
+          mv kustomization.yaml.tmp kustomization.yaml
+
+          echo "✅ kustomization.yaml updated successfully"
+          echo ""
+          echo "=== Updated kustomization.yaml ==="
+          cat kustomization.yaml
+          
+          # Validate - check that newName doesn't contain PLACEHOLDER
+          if grep -q "newName:.*PLACEHOLDER" kustomization.yaml; then
+            echo "❌ ERROR: newName still contains PLACEHOLDER!"
+            grep -n "newName:.*PLACEHOLDER" kustomization.yaml
             exit 1
           fi
           
-          echo ""
-          echo "✅ kustomization.yaml updated successfully"
-          echo "Final content:"
-          cat kustomization.yaml
+          if grep -q "TODO\|CHANGEME" kustomization.yaml; then
+            echo "❌ ERROR: Invalid placeholders found!"
+            grep -n "TODO\|CHANGEME" kustomization.yaml
+            exit 1
+          fi
+          
+          echo "✅ Validation passed"
 
           echo ""
           echo "=== Updated kustomization.yaml ==="
