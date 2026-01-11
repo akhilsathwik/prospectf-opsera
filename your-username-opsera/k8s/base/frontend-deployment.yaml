@@ -25,6 +25,9 @@ spec:
         - containerPort: 8080
           name: http
           protocol: TCP
+        env:
+        - name: BACKEND_SERVICE
+          value: your-username-backend
         resources:
           requests:
             cpu: 50m
