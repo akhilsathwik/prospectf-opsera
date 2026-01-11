@@ -6,10 +6,11 @@ namespace: your-username-dev
 resources:
   - ../../base
 
+
 images:
-  - name: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-backend
-    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-backend
-    newTag: "51a04f819a86b3048abe9c9153efa704690052f5"
-  - name: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-frontend
-    newName: 792373136340.dkr.ecr.us-west-2.amazonaws.com/opsera-se/your-username-frontend
-    newTag: "51a04f819a86b3048abe9c9153efa704690052f5"
+  - name: PLACEHOLDER_ECR_BACKEND
+    newName: 792373136340.dkr.ecr.ap-south-1.amazonaws.com/opsera-se/your-username-backend
+    newTag: "721938d33eebd4e37b4483afff8684b6966a5092"
+  - name: PLACEHOLDER_ECR_FRONTEND
+    newName: 792373136340.dkr.ecr.ap-south-1.amazonaws.com/opsera-se/your-username-frontend
+    newTag: "721938d33eebd4e37b4483afff8684b6966a5092"
