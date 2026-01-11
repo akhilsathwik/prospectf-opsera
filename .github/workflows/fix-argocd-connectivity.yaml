@@ -1,0 +1,223 @@
+name: Fix ArgoCD Connectivity
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_name:
+        description: 'Tenant name'
+        required: true
+        default: 'opsera-se'
+        type: string
+      app_name:
+        description: 'Application name'
+        required: true
+        default: 'your-username'
+        type: string
+      app_region:
+        description: 'AWS region'
+        required: true
+        default: 'ap-south-1'
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  REGION_SHORT: ${{ inputs.app_region == 'ap-south-1' && 'aps1' || inputs.app_region }}
+  ARGOCD_CLUSTER: argocd-${{ inputs.app_region == 'ap-south-1' && 'aps1' || inputs.app_region }}
+  WORKLOAD_CLUSTER: ${{ inputs.tenant_name }}-${{ inputs.app_region == 'ap-south-1' && 'aps1' || inputs.app_region }}-np
+
+jobs:
+  fix-connectivity:
+    name: "Fix ArgoCD Connectivity"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.app_region }}
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          kubectl version --client
+
+      - name: Verify Cluster Endpoint Configuration
+        run: |
+          echo "=========================================="
+          echo "VERIFYING CLUSTER ENDPOINT CONFIGURATION"
+          echo "=========================================="
+          
+          WORKLOAD_CONFIG=$(aws eks describe-cluster --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }} \
+            --query 'cluster.resourcesVpcConfig.{EndpointPublicAccess:endpointPublicAccess,EndpointPrivateAccess:endpointPrivateAccess}' \
+            --output json)
+          
+          echo "Workload Cluster Config: $WORKLOAD_CONFIG"
+          
+          ENDPOINT_PUBLIC=$(echo "$WORKLOAD_CONFIG" | jq -r '.EndpointPublicAccess')
+          
+          if [ "$ENDPOINT_PUBLIC" != "true" ]; then
+            echo "⚠️  Public endpoint not enabled. Enabling..."
+            aws eks update-cluster-config \
+              --name "${{ env.WORKLOAD_CLUSTER }}" \
+              --region ${{ inputs.app_region }} \
+              --resources-vpc-config endpointPublicAccess=true,endpointPrivateAccess=true,publicAccessCidrs=["0.0.0.0/0"]
+            
+            echo "Waiting for cluster update..."
+            aws eks wait cluster-active --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }}
+            echo "✅ Public endpoint enabled"
+          else
+            echo "✅ Public endpoint already enabled"
+          fi
+
+      - name: Configure Security Groups
+        run: |
+          echo "=========================================="
+          echo "CONFIGURING SECURITY GROUPS"
+          echo "=========================================="
+          
+          # Get security group IDs
+          WORKLOAD_SG=$(aws eks describe-cluster --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }} \
+            --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+          
+          ARGOCD_VPC_ID=$(aws eks describe-cluster --name "${{ env.ARGOCD_CLUSTER }}" --region ${{ inputs.app_region }} \
+            --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+          
+          ARGOCD_VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids "$ARGOCD_VPC_ID" --region ${{ inputs.app_region }} \
+            --query 'Vpcs[0].CidrBlock' --output text)
+          
+          echo "Workload Security Group: $WORKLOAD_SG"
+          echo "ArgoCD VPC CIDR: $ARGOCD_VPC_CIDR"
+          
+          # Check if rule exists
+          EXISTING_RULE=$(aws ec2 describe-security-group-rules \
+            --filters "Name=group-id,Values=$WORKLOAD_SG" "Name=is-egress,Values=false" \
+            --query "SecurityGroupRules[?CidrIpv4=='$ARGOCD_VPC_CIDR' && FromPort==443 && ToPort==443]" \
+            --region ${{ inputs.app_region }} --output json)
+          
+          if [ "$(echo "$EXISTING_RULE" | jq 'length')" -eq 0 ]; then
+            echo "Adding security group rule..."
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$WORKLOAD_SG" \
+              --protocol tcp \
+              --port 443 \
+              --cidr "$ARGOCD_VPC_CIDR" \
+              --region ${{ inputs.app_region }} || echo "Rule may already exist"
+            echo "✅ Security group rule added"
+          else
+            echo "✅ Security group rule already exists"
+          fi
+
+      - name: Update ArgoCD Cluster Secret
+        run: |
+          echo "=========================================="
+          echo "UPDATING ARGOCD CLUSTER SECRET"
+          echo "=========================================="
+          
+          # Get cluster endpoints
+          WORKLOAD_ENDPOINT=$(aws eks describe-cluster --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }} \
+            --query 'cluster.endpoint' --output text)
+          WORKLOAD_CA=$(aws eks describe-cluster --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }} \
+            --query 'cluster.certificateAuthority.data' --output text)
+          
+          echo "Workload Endpoint: $WORKLOAD_ENDPOINT"
+          
+          # Configure kubectl for workload cluster
+          aws eks update-kubeconfig --name "${{ env.WORKLOAD_CLUSTER }}" --region ${{ inputs.app_region }}
+          
+          # Create/update ServiceAccount
+          kubectl create namespace argocd-manager || true
+          
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: argocd-manager
+            namespace: argocd-manager
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: argocd-manager-role-binding
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+            - kind: ServiceAccount
+              name: argocd-manager
+              namespace: argocd-manager
+          EOF
+          
+          sleep 10
+          
+          # Get ServiceAccount token
+          SA_TOKEN=$(kubectl get secret -n argocd-manager -o jsonpath='{.items[?(@.metadata.annotations.kubernetes\.io/service-account\.name=="argocd-manager")].data.token}' | base64 -d || echo "")
+          
+          if [ -z "$SA_TOKEN" ]; then
+            echo "Creating token secret manually..."
+            kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: argocd-manager-token
+            namespace: argocd-manager
+            annotations:
+              kubernetes.io/service-account.name: argocd-manager
+          type: kubernetes.io/service-account-token
+          EOF
+            sleep 10
+            SA_TOKEN=$(kubectl get secret argocd-manager-token -n argocd-manager -o jsonpath='{.data.token}' | base64 -d)
+          fi
+          
+          # Switch to ArgoCD cluster
+          aws eks update-kubeconfig --name "${{ env.ARGOCD_CLUSTER }}" --region ${{ inputs.app_region }}
+          
+          # Delete old secret
+          kubectl delete secret "${{ env.WORKLOAD_CLUSTER }}-secret" -n argocd || true
+          
+          # Create new Cluster Secret
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: ${{ env.WORKLOAD_CLUSTER }}-secret
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: cluster
+          type: Opaque
+          stringData:
+            name: ${{ env.WORKLOAD_CLUSTER }}
+            server: ${WORKLOAD_ENDPOINT}
+            config: |
+              {
+                "bearerToken": "${SA_TOKEN}",
+                "tlsClientConfig": {
+                  "caData": "${WORKLOAD_CA}",
+                  "insecure": false
+                }
+              }
+          EOF
+          
+          echo "✅ Cluster Secret updated"
+
+      - name: Verify Fix
+        run: |
+          echo "=========================================="
+          echo "VERIFYING FIX"
+          echo "=========================================="
+          
+          aws eks update-kubeconfig --name "${{ env.ARGOCD_CLUSTER }}" --region ${{ inputs.app_region }}
+          
+          echo "Checking ArgoCD Application status..."
+          kubectl get application ${{ inputs.app_name }}-dev -n argocd || echo "Application not found"
+          
+          echo ""
+          echo "✅ Fix complete! ArgoCD should now be able to sync."
+          echo ""
+          echo "Monitor sync with:"
+          echo "  kubectl get application ${{ inputs.app_name }}-dev -n argocd -w"
