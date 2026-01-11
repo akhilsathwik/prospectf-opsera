@@ -1310,6 +1310,35 @@ jobs:
           echo "Waiting for frontend pods..."
           kubectl wait --for=condition=ready pod -l app=${APP_NAME}-frontend -n $NAMESPACE --timeout=300s || true
 
+          # Diagnose frontend pods if not ready
+          echo ""
+          echo "=== Frontend Pod Status ==="
+          kubectl get pods -n $NAMESPACE -l app=${APP_NAME}-frontend
+          
+          echo ""
+          echo "=== Frontend Pod Events ==="
+          kubectl get events -n $NAMESPACE --field-selector involvedObject.kind=Pod --sort-by='.lastTimestamp' | grep frontend | tail -20 || true
+          
+          echo ""
+          echo "=== Frontend Pod Details ==="
+          for pod in $(kubectl get pods -n $NAMESPACE -l app=${APP_NAME}-frontend -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Pod: $pod ---"
+            kubectl describe pod $pod -n $NAMESPACE | grep -A 30 "Events:" || true
+            echo ""
+            echo "--- Logs from Pod: $pod ---"
+            kubectl logs $pod -n $NAMESPACE --tail=100 || true
+            echo ""
+            echo "--- Environment Variables from Pod: $pod ---"
+            kubectl exec $pod -n $NAMESPACE -- env 2>/dev/null | grep BACKEND || echo "Cannot exec into pod"
+            echo ""
+            echo "--- nginx config from Pod: $pod ---"
+            kubectl exec $pod -n $NAMESPACE -- cat /etc/nginx/conf.d/default.conf 2>/dev/null || echo "Cannot read config"
+            echo ""
+            echo "--- Testing nginx config from Pod: $pod ---"
+            kubectl exec $pod -n $NAMESPACE -- nginx -t 2>&1 || true
+            echo ""
+          done
+
           # Get LoadBalancer endpoint
           for i in {1..30}; do
             ENDPOINT=$(kubectl get svc ${APP_NAME}-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
