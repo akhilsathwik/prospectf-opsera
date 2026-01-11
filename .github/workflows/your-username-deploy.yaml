@@ -39,13 +39,13 @@ env:
   # Derive deploy branch from app name
   DEPLOY_BRANCH: ${{ inputs.app_name }}-deploy
   # Short region code (derive from region input)
-  REGION_SHORT: ${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region }}
+  REGION_SHORT: ${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region == 'ap-south-1' && 'aps1' || inputs.app_region == 'ap-southeast-1' && 'apse1' || inputs.app_region == 'ap-northeast-1' && 'apne1' || inputs.app_region }}
   # Short cluster env (np = nonprod, prod = prod)
   CLUSTER_ENV_SHORT: ${{ inputs.app_env == 'prod' && 'prod' || 'np' }}
   # Resource names using short convention
   VPC_NAME: opsera-vpc
-  ARGOCD_CLUSTER: argocd-${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region }}
-  WORKLOAD_CLUSTER: ${{ inputs.tenant_name }}-${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region }}-${{ inputs.app_env == 'prod' && 'prod' || 'np' }}
+  ARGOCD_CLUSTER: argocd-${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region == 'ap-south-1' && 'aps1' || inputs.app_region == 'ap-southeast-1' && 'apse1' || inputs.app_region == 'ap-northeast-1' && 'apne1' || inputs.app_region }}
+  WORKLOAD_CLUSTER: ${{ inputs.tenant_name }}-${{ inputs.app_region == 'us-west-2' && 'usw2' || inputs.app_region == 'us-west-1' && 'usw1' || inputs.app_region == 'us-east-1' && 'use1' || inputs.app_region == 'us-east-2' && 'use2' || inputs.app_region == 'eu-west-1' && 'euw1' || inputs.app_region == 'eu-west-2' && 'euw2' || inputs.app_region == 'eu-central-1' && 'euc1' || inputs.app_region == 'ap-south-1' && 'aps1' || inputs.app_region == 'ap-southeast-1' && 'apse1' || inputs.app_region == 'ap-northeast-1' && 'apne1' || inputs.app_region }}-${{ inputs.app_env == 'prod' && 'prod' || 'np' }}
   ECR_REPO: ${{ inputs.tenant_name }}/${{ inputs.app_name }}
   NAMESPACE: ${{ inputs.app_name }}-${{ inputs.app_env }}
 
@@ -366,7 +366,7 @@ jobs:
 
           terraform init \
             -backend-config="bucket=${BUCKET_NAME}" \
-            -backend-config="key=your-username/vpc/terraform.tfstate" \
+            -backend-config="key=${{ inputs.app_name }}/vpc/terraform.tfstate" \
             -backend-config="region=${{ inputs.app_region }}" \
             -backend-config="dynamodb_table=${TABLE_NAME}" \
             -backend-config="encrypt=true"
@@ -723,6 +723,8 @@ jobs:
       - name: Install ArgoCD
         if: steps.discover.outputs.argocd_exists == 'false'
         run: |
+          echo "Installing ArgoCD on cluster: ${{ env.ARGOCD_CLUSTER }}"
+          
           curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 
@@ -731,7 +733,22 @@ jobs:
           kubectl create namespace argocd || true
           kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-          kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd || true
+          echo "Waiting for ArgoCD server to be available..."
+          kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd || true
+          
+          # Learning #162: Create Repository Secret for private repo access
+          echo "Creating ArgoCD Repository Secret..."
+          kubectl create secret generic repo-${{ inputs.app_name }} \
+            --namespace argocd \
+            --from-literal=type=git \
+            --from-literal=url=https://github.com/${{ github.repository }}.git \
+            --from-literal=username=git \
+            --from-literal=password=${{ secrets.GITHUB_TOKEN }} \
+            --dry-run=client -o yaml | \
+            kubectl label -f - argocd.argoproj.io/secret-type=repository --local -o yaml | \
+            kubectl apply -f - || echo "Repository secret may already exist"
+          
+          echo "✅ ArgoCD installed and configured"
 
   application:
     name: "Phase 2: Application"
@@ -745,20 +762,36 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create or Checkout Deploy Branch
+      - name: Create or Checkout Deploy Branch (Learning #160)
         run: |
+          echo "========================================"
+          echo "SETTING UP DEPLOY BRANCH"
+          echo "========================================"
+          
           DEPLOY_BRANCH="${{ env.DEPLOY_BRANCH }}"
           
+          # Learning #160: Deploy branch for artifacts, main only for GHA workflows
           # Check if branch exists
           if git ls-remote --heads origin "$DEPLOY_BRANCH" | grep -q "$DEPLOY_BRANCH"; then
             echo "Branch $DEPLOY_BRANCH exists, checking out..."
             git checkout "$DEPLOY_BRANCH"
             git pull origin "$DEPLOY_BRANCH" || true
           else
-            echo "Branch $DEPLOY_BRANCH does not exist, creating from main..."
+            echo "Branch $DEPLOY_BRANCH does not exist, creating from main/master..."
+            # Try main first, fallback to master
+            if git show-ref --verify --quiet refs/heads/main; then
+              git checkout main
+            elif git show-ref --verify --quiet refs/heads/master; then
+              git checkout master
+            else
+              echo "ERROR: Neither main nor master branch found"
+              exit 1
+            fi
             git checkout -b "$DEPLOY_BRANCH"
             git push -u origin "$DEPLOY_BRANCH" || echo "Failed to push branch, will continue"
           fi
+          
+          echo "✅ Using deploy branch: $DEPLOY_BRANCH"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -880,57 +913,148 @@ jobs:
             --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
             --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} || true
 
-      - name: Register Workload Cluster with ArgoCD
+      - name: Register Workload Cluster with ArgoCD (Learning #158)
         run: |
-          echo "Registering workload cluster with ArgoCD..."
+          echo "========================================"
+          echo "REGISTERING WORKLOAD CLUSTER WITH ARGOCD"
+          echo "========================================"
           
           aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
           
-          # Get workload cluster endpoint and CA certificate
-          WORKLOAD_ENDPOINT=$(aws eks describe-cluster --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }} --query 'cluster.endpoint' --output text)
-          WORKLOAD_CA=$(aws eks describe-cluster --name "${{ needs.infrastructure.outputs.workload_cluster }}" --region ${{ inputs.app_region }} --query 'cluster.certificateAuthority.data' --output text)
-          WORKLOAD_NAME="${{ needs.infrastructure.outputs.workload_cluster }}"
+          # Learning #158: Create ServiceAccount in workload cluster for ArgoCD access
+          WORKLOAD_CLUSTER="${{ needs.infrastructure.outputs.workload_cluster }}"
           
-          # Create cluster secret for ArgoCD
+          echo "Step 1: Creating argocd-manager ServiceAccount in workload cluster..."
+          aws eks update-kubeconfig --name "$WORKLOAD_CLUSTER" --region ${{ inputs.app_region }}
+          
+          kubectl create namespace argocd-manager || true
+          
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: argocd-manager
+            namespace: argocd-manager
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: argocd-manager-role-binding
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+            - kind: ServiceAccount
+              name: argocd-manager
+              namespace: argocd-manager
+          EOF
+          
+          # Get ServiceAccount token
+          echo "Step 2: Getting ServiceAccount token..."
+          sleep 5  # Wait for token to be created
+          SA_TOKEN=$(kubectl get secret -n argocd-manager -o jsonpath='{.items[?(@.metadata.annotations.kubernetes\.io/service-account\.name=="argocd-manager")].data.token}' | base64 -d || echo "")
+          
+          if [ -z "$SA_TOKEN" ]; then
+            echo "⚠️  ServiceAccount token not found, creating manually..."
+            # Create token secret manually
+            kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: argocd-manager-token
+            namespace: argocd-manager
+            annotations:
+              kubernetes.io/service-account.name: argocd-manager
+          type: kubernetes.io/service-account-token
+          EOF
+            sleep 5
+            SA_TOKEN=$(kubectl get secret argocd-manager-token -n argocd-manager -o jsonpath='{.data.token}' | base64 -d)
+          fi
+          
+          # Get cluster CA cert
+          WORKLOAD_CA=$(aws eks describe-cluster --name "$WORKLOAD_CLUSTER" --region ${{ inputs.app_region }} --query 'cluster.certificateAuthority.data' --output text)
+          WORKLOAD_ENDPOINT=$(aws eks describe-cluster --name "$WORKLOAD_CLUSTER" --region ${{ inputs.app_region }} --query 'cluster.endpoint' --output text)
+          
+          echo "Step 3: Creating Cluster Secret in ArgoCD cluster..."
+          aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
+          
+          # Learning #158: Create Cluster Secret with bearer token
           cat <<EOF | kubectl apply -f -
           apiVersion: v1
           kind: Secret
           metadata:
-            name: ${WORKLOAD_NAME}-secret
+            name: ${WORKLOAD_CLUSTER}-secret
             namespace: argocd
             labels:
               argocd.argoproj.io/secret-type: cluster
           type: Opaque
           stringData:
-            name: ${WORKLOAD_NAME}
+            name: ${WORKLOAD_CLUSTER}
             server: ${WORKLOAD_ENDPOINT}
             config: |
               {
-                "bearerToken": "",
+                "bearerToken": "${SA_TOKEN}",
                 "tlsClientConfig": {
                   "caData": "${WORKLOAD_CA}",
                   "insecure": false
-                },
-                "awsAuthConfig": {
-                  "clusterName": "${WORKLOAD_NAME}"
                 }
               }
           EOF
           
           echo "✅ Workload cluster registered with ArgoCD"
+          echo "   Cluster: $WORKLOAD_CLUSTER"
+          echo "   Endpoint: $WORKLOAD_ENDPOINT"
 
-      - name: Apply ArgoCD Application
+      - name: Apply ArgoCD Application (Learning #164)
         run: |
+          echo "========================================"
+          echo "APPLYING ARGOCD APPLICATION"
+          echo "========================================"
+          
           aws eks update-kubeconfig --name "${{ needs.infrastructure.outputs.argocd_cluster }}" --region ${{ inputs.app_region }}
           
-          # Update application.yaml to use workload cluster name instead of kubernetes.default.svc
+          # Learning #164: ArgoCD Application must be APPLIED to cluster, not just in Git
           WORKLOAD_NAME="${{ needs.infrastructure.outputs.workload_cluster }}"
-          APP_FILE="${{ inputs.app_name }}-opsera/argocd/application.yaml"
+          WORKLOAD_ENDPOINT=$(aws eks describe-cluster --name "$WORKLOAD_NAME" --region ${{ inputs.app_region }} --query 'cluster.endpoint' --output text)
+          APP_NAME="${{ inputs.app_name }}-${{ inputs.app_env }}"
           
-          # Create temporary file with updated destination
-          sed "s|server: https://kubernetes.default.svc|name: ${WORKLOAD_NAME}|g" "$APP_FILE" > /tmp/application.yaml
+          # Learning #160: Use deploy branch for manifests
+          DEPLOY_BRANCH="${{ env.DEPLOY_BRANCH }}"
           
-          kubectl apply -f /tmp/application.yaml || true
+          # Create ArgoCD Application manifest
+          cat <<EOF | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: ${APP_NAME}
+            namespace: argocd
+            finalizers:
+              - resources-finalizer.argocd.argoproj.io
+          spec:
+            project: default
+            source:
+              repoURL: https://github.com/${{ github.repository }}
+              targetRevision: ${DEPLOY_BRANCH}
+              path: ${{ inputs.app_name }}-opsera/k8s/overlays/${{ inputs.app_env }}
+            destination:
+              server: ${WORKLOAD_ENDPOINT}
+              namespace: ${{ needs.infrastructure.outputs.namespace }}
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+                allowEmpty: false
+              syncOptions:
+                - CreateNamespace=true
+                - PrunePropagationPolicy=foreground
+                - PruneLast=true
+            revisionHistoryLimit: 3
+          EOF
+          
+          echo "✅ ArgoCD Application created: $APP_NAME"
+          echo "   Target cluster: $WORKLOAD_NAME"
+          echo "   Source branch: $DEPLOY_BRANCH"
 
       - name: Wait for ArgoCD Sync
         run: |
