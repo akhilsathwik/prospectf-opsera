@@ -7,10 +7,11 @@ resources:
   - ../../base
 
 
+
 images:
   - name: PLACEHOLDER_ECR_BACKEND
     newName: 792373136340.dkr.ecr.ap-south-1.amazonaws.com/opsera-se/your-username-backend
-    newTag: "721938d33eebd4e37b4483afff8684b6966a5092"
+    newTag: "36c01a7992a7342ce419297873f0828992987dca"
   - name: PLACEHOLDER_ECR_FRONTEND
     newName: 792373136340.dkr.ecr.ap-south-1.amazonaws.com/opsera-se/your-username-frontend
-    newTag: "721938d33eebd4e37b4483afff8684b6966a5092"
+    newTag: "36c01a7992a7342ce419297873f0828992987dca"
